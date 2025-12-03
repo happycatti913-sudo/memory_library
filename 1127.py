@@ -15,160 +15,56 @@ import sys
 import json
 import uuid
 import time
-import sqlite3
 import streamlit as st
 import pandas as pd
-from datetime import datetime
 import altair as alt
 
-
-# 让同目录下的 kb_dynamic.py 可被导入(如果存在)
-sys.path.append(os.path.dirname(__file__))
-
-# ======== 基本路径设置 ========
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-DB_PATH = os.path.join(BASE_DIR, "kb.db")
-
-PROJECT_DIR = os.path.join(BASE_DIR, "uploads")
-os.makedirs(PROJECT_DIR, exist_ok=True)
-
-# 统一的语义索引根目录: semantic_index/{project_id}/...
-SEM_INDEX_ROOT = os.path.join(BASE_DIR, "semantic_index")
-os.makedirs(SEM_INDEX_ROOT, exist_ok=True)
-
-# ---------- 语义索引文件路径 ----------
-# ---------- 领域归一化 & 索引路径 ----------
-def _norm_domain_key(raw: str | None) -> str:
-    """
-    把数据库里的 domain 字段转成适合作为文件夹名的 key：
-    - None/空 → "未分类"
-    - 去掉首尾空格
-    - 替换掉不适合作为路径的字符
-    """
-    s = (raw or "").strip()
-    if not s:
-        s = "未分类"
-    # Windows 不允许的字符简单替换掉
-    for ch in r'\\/:"*?<>|':
-        s = s.replace(ch, "_")
-    return s
-
-
-def _norm_domain_key(raw: str | None) -> str:
-    """
-    把数据库里的 domain 字段转成适合作为文件夹名的 key：
-    - None/空 → "未分类"
-    - 去掉首尾空格
-    - 替换掉不适合作为路径的字符(Windows 下的保留字符)
-    """
-    s = (raw or "").strip()
-    if not s:
-        s = "未分类"
-    for ch in r'\\/:"*?<>|':
-        s = s.replace(ch, "_")
-    return s
-
-
-# ---------- 语义索引路径:按“领域 → 类型”归类 ----------
-def _index_paths(project_id: int):
-    """
-    统一的语义索引路径(按“领域/类型”归类):
-
-        BASE_DIR / semantic_index / {domain_key} / bilingual / index.faiss
-                                                       / mapping.json
-                                                       / vectors.npy
-
-    目前仅支持双语对照(bilingual)索引;
-    未来如果增加翻译策略(strategy), 可以在这里扩展 kb_type 参数.
-    """
-    # 尝试根据项目推断领域; 拿不到时归入“未分类”
-    domain_raw = None
-    try:
-        if "cur" in globals():
-            row = cur.execute(
-                "SELECT IFNULL(domain,'') FROM items WHERE id=?",
-                (int(project_id),)
-            ).fetchone()
-            if row:
-                domain_raw = (row[0] or "").strip()
-    except Exception:
-        domain_raw = None
-
-    domain_key = _norm_domain_key(domain_raw)
-    kb_type = "bilingual"
-
-    base_dir = os.path.join(BASE_DIR, "semantic_index", domain_key, kb_type)
-    os.makedirs(base_dir, exist_ok=True)
-
-    idx_path = os.path.join(base_dir, "index.faiss")
-    map_path = os.path.join(base_dir, "mapping.json")
-    vec_path = os.path.join(base_dir, "vectors.npy")
-
-    return idx_path, map_path, vec_path
-
-# ======== 轻量日志机制 ========
-LOG_DIR = os.path.join(BASE_DIR, "logs")
-os.makedirs(LOG_DIR, exist_ok=True)
-LOG_FILE = os.path.join(LOG_DIR, "app.log")
-
-
-def log_event(level: str, message: str, **extra):
-    """
-    轻量日志记录:
-        level  : "INFO" / "WARNING" / "ERROR"
-        message: 简短描述
-        extra  : 可选的结构化字段, 会一起写入 JSON
-    写入路径: BASE_DIR/logs/app.log
-    """
-    try:
-        ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        record = {
-            "time": ts,
-            "level": (level or "INFO").upper(),
-            "message": str(message),
-        }
-        if extra:
-            record["extra"] = extra
-        with open(LOG_FILE, "a", encoding="utf-8") as f:
-            f.write(json.dumps(record, ensure_ascii=False) + "\n")
-    except Exception:
-        # 日志本身永远不能炸应用，静默失败
-        pass
-
-# ==== third-party ====
-try:
-    from docx import Document  # 在需要处仍会 try/except
-except Exception:
-    Document = None
+from app_core.config import (
+    BASE_DIR,
+    DB_PATH,
+    LOG_DIR,
+    LOG_FILE,
+    Document,
+    KBEmbedder,
+    build_prompt_soft,
+    build_prompt_strict,
+    dedup_terms_against_db,
+    highlight_terms,
+    log_event,
+    make_sk,
+    recommend_for_segment,
+    sk,
+    _norm_domain_key,
+    _project_domain,
+)
+from app_core.database import ensure_col, init_db, _get_domain_for_proj, _has_col
+from app_core.projects import (
+    cleanup_project_files,
+    ensure_legacy_file_record,
+    get_project_fewshot_enabled,
+    get_project_fewshot_examples,
+    get_project_ref_ids,
+    fetch_project_files,
+    register_project_file,
+    remove_project_file,
+    set_project_fewshot_enabled,
+)
+from app_core.semantic_index import (
+    _lazy_import_vec,
+    _load_index,
+    _load_index_domain,
+    _save_index,
+    _save_index_domain,
+    build_project_vector_index,
+    build_strategy_index_for_domain,
+    get_embedder,
+    rebuild_project_semantic_index,
+)
 
 # ========== 页面设置 ==========
 st.set_page_config(page_title="个人翻译知识库管理系统3.0", layout="wide")
 
-# ========== kb_dynamic (可选) ==========
-KBEmbedder = None
-recommend_for_segment = None
-build_prompt_strict = None
-build_prompt_soft = None
-try:
-    from kb_dynamic import (
-        KBEmbedder as _KBEmbedder,
-        recommend_for_segment as _recommend_for_segment,
-        build_prompt_strict as _build_prompt_strict,
-        build_prompt_soft as _build_prompt_soft,
-    )
-    KBEmbedder = _KBEmbedder
-    recommend_for_segment = _recommend_for_segment
-    build_prompt_strict = _build_prompt_strict
-    build_prompt_soft = _build_prompt_soft
-except Exception:
-    pass  # 允许缺失;动态术语推荐功能将自动降级
-
 # ========== 工具函数 ==========
-def make_sk(prefix: str):
-    """返回一个带有前缀的 key 生成器"""
-    return lambda name, id=None: f"{prefix}_{name}_{id}" if id else f"{prefix}_{name}"
-# 全局默认 key 生成器(替代被删除的计数器版 sk)
-sk = make_sk("global")
 
 def render_table(df, *, key=None, hide_index=True, editable=False):
     """
@@ -199,36 +95,6 @@ def render_table(df, *, key=None, hide_index=True, editable=False):
             disabled=not editable,
             key=key,
         )
-# ========== 文本高亮函数 ==========
-def highlight_terms(text: str, term_pairs: list):
-    """高亮术语，term_pairs = [(src, tgt), ..]"""
-    if not term_pairs:
-        return text
-
-    import re
-    safe = text
-
-    for s, t in term_pairs:
-        if not s:
-            continue
-        # 对 source term 做高亮（黄色）
-        safe = re.sub(
-            re.escape(s),
-            fr"<span style='background: #fff3b0'>{s}</span>",
-            safe,
-            flags=re.IGNORECASE
-        )
-        # 对 target term 也高亮（淡绿）
-        if t:
-            safe = re.sub(
-                re.escape(t),
-                fr"<span style='background: #d4f6d4'>{t}</span>",
-                safe,
-                flags=re.IGNORECASE
-            )
-
-    return safe
-
 def render_index_manager(st, conn, cur):
     """
     🧠 统一的索引管理页面:
@@ -327,7 +193,7 @@ def render_index_manager(st, conn, cur):
 
     with c1:
         if st.button("🔁 重建当前项目索引", type="primary", key=f"rebuild_idx_{pid_sel}"):
-            res = rebuild_project_semantic_index(pid_sel)
+            res = rebuild_project_semantic_index(cur, pid_sel, split_fn=_split_pair_for_index)
             if res.get("ok"):
                 st.success(
                     f"索引已重建: 新增 {res['added']} 条, 总量 {res['total']} 条。"
@@ -340,7 +206,7 @@ def render_index_manager(st, conn, cur):
             ok_cnt = fail_cnt = 0
             for r in rows:
                 pid = r[0]
-                res = rebuild_project_semantic_index(pid)
+                res = rebuild_project_semantic_index(cur, pid, split_fn=_split_pair_for_index)
                 if res.get("ok"):
                     ok_cnt += 1
                 else:
@@ -454,195 +320,8 @@ def get_terms_for_project(cur, pid: int, use_dynamic: bool = True):
 
     return term_map, term_meta
 
-# ======= 轻量术语候选(中英都可;你后续可换成 DeepSeek 抽取)=======
-
-def register_project_file(cur, conn, project_id, file_name, data_bytes):
-    """
-    将上传的文件保存到项目目录，并记录在 project_files 表中。
-    """
-    if not project_id or not data_bytes:
-        return None
-    safe_name = os.path.basename(file_name) or f"project_{project_id}_file"
-    proj_dir = os.path.join(PROJECT_DIR, f"project_{project_id}")
-    os.makedirs(proj_dir, exist_ok=True)
-    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    uniq_name = f"{stamp}_{uuid.uuid4().hex[:6]}_{safe_name}"
-    full_path = os.path.join(proj_dir, uniq_name)
-    with open(full_path, "wb") as f:
-        f.write(data_bytes)
-    cur.execute(
-        """
-        INSERT INTO project_files (project_id, file_path, file_name)
-        VALUES (?, ?, ?)
-        """,
-        (project_id, full_path, safe_name),
-    )
-    conn.commit()
-    return full_path
 
 
-def fetch_project_files(cur, project_id):
-    if not project_id:
-        return []
-    rows = cur.execute(
-        """
-        SELECT id, IFNULL(file_name,''), IFNULL(file_path,''), IFNULL(uploaded_at,'')
-        FROM project_files
-        WHERE project_id=?
-        ORDER BY id DESC
-        """,
-        (project_id,),
-    ).fetchall()
-    items = []
-    for fid, name, path, uploaded in rows:
-        if not path:
-            continue
-        display = name or os.path.basename(path) or f"file_{fid}"
-        items.append(
-            {
-                "id": fid,
-                "name": display,
-                "path": path,
-                "uploaded_at": uploaded,
-            }
-        )
-    return items
-
-
-def ensure_legacy_file_record(cur, conn, project_id, legacy_path):
-    """
-    旧版仅支持单文件，若检测到 item_ext.src_path，自动同步到 project_files。
-    """
-    if not (project_id and legacy_path):
-        return
-    exists = cur.execute(
-        "SELECT 1 FROM project_files WHERE project_id=? AND file_path=?",
-        (project_id, legacy_path),
-    ).fetchone()
-    if exists:
-        return
-    cur.execute(
-        """
-        INSERT INTO project_files (project_id, file_path, file_name)
-        VALUES (?, ?, ?)
-        """,
-        (project_id, legacy_path, os.path.basename(legacy_path) or None),
-    )
-    conn.commit()
-
-
-def remove_project_file(cur, conn, file_id):
-    row = cur.execute("SELECT file_path FROM project_files WHERE id=?", (file_id,)).fetchone()
-    if row:
-        (path,) = row
-        if path and os.path.exists(path):
-            try:
-                os.remove(path)
-            except Exception:
-                pass
-    cur.execute("DELETE FROM project_files WHERE id=?", (file_id,))
-    conn.commit()
-
-
-def cleanup_project_files(cur, conn, project_id):
-    rows = cur.execute("SELECT file_path FROM project_files WHERE project_id=?", (project_id,)).fetchall()
-    for (fp,) in rows:
-        if fp and os.path.exists(fp):
-            try:
-                os.remove(fp)
-            except Exception:
-                pass
-    cur.execute("DELETE FROM project_files WHERE project_id=?", (project_id,))
-    conn.commit()
-
-
-def _ensure_project_ref_map():
-    """
-    确保 session_state['corpus_refs'] 为 {project_id: set(ids)} 结构。
-    """
-    refs = st.session_state.get("corpus_refs")
-    if isinstance(refs, dict):
-        return refs
-    st.session_state["corpus_refs"] = {}
-    return st.session_state["corpus_refs"]
-
-
-def _ensure_project_switch_map():
-    """
-    确保 session_state['cor_use_ref'] 为 {project_id: bool} 结构。
-    """
-    switches = st.session_state.get("cor_use_ref")
-    if isinstance(switches, dict):
-        return switches
-    st.session_state["cor_use_ref"] = {}
-    return st.session_state["cor_use_ref"]
-
-
-def get_project_ref_ids(project_id: int | None) -> set[int]:
-    if not project_id:
-        return set()
-    ref_map = _ensure_project_ref_map()
-    ref_map.setdefault(project_id, set())
-    return ref_map[project_id]
-
-
-def get_project_fewshot_enabled(project_id: int | None) -> bool:
-    if not project_id:
-        return False
-    switch_map = _ensure_project_switch_map()
-    return bool(switch_map.get(project_id, False))
-
-
-def set_project_fewshot_enabled(project_id: int | None, value: bool):
-    if not project_id:
-        return
-    switch_map = _ensure_project_switch_map()
-    switch_map[project_id] = bool(value)
-
-
-def get_project_fewshot_examples(
-    cur,
-    project_id: int | None,
-    *,
-    limit: int | None = 5,
-    require_enabled: bool = True,
-):
-    if not project_id:
-        return []
-    if require_enabled and not get_project_fewshot_enabled(project_id):
-        return []
-
-    ref_ids = list(get_project_ref_ids(project_id))
-    if not ref_ids:
-        return []
-
-    ref_ids = sorted({int(rid) for rid in ref_ids if str(rid).isdigit()}, reverse=True)
-    if limit is not None and len(ref_ids) > limit:
-        ref_ids = ref_ids[:limit]
-
-    qmarks = ",".join(["?"] * len(ref_ids))
-    rows = cur.execute(
-        f"SELECT id, title, IFNULL(src_text,''), IFNULL(tgt_text,'') FROM corpus WHERE id IN ({qmarks})",
-        ref_ids,
-    ).fetchall()
-    order_map = {rid: idx for idx, rid in enumerate(ref_ids)}
-    rows.sort(key=lambda r: order_map.get(r[0], len(order_map)))
-
-    examples = []
-    for rid, title, src, tgt in rows:
-        src_norm = (src or "").strip()
-        tgt_norm = (tgt or "").strip()
-        if not (src_norm and tgt_norm):
-            continue
-        examples.append(
-            {
-                "id": rid,
-                "title": title or f"示例#{rid}",
-                "src": src_norm,
-                "tgt": tgt_norm,
-            }
-        )
-    return examples
 def run_project_translation_ui(
     pid,
     project_title,
@@ -1010,419 +689,8 @@ def read_pdf_text(file_like) -> str:
             return _normalize(extract_text(io.BytesIO(data)))
         except Exception:
             return ""
-def _lazy_import_vec():
-    """
-    兼容旧代码的占位函数：
-    返回 (np, faiss, SentenceTransformer, FastEmbedModel, TfidfVectorizer, extra)
-    实际上你现在系统只用 get_embedder，不再依赖这个函数的输出。
-    """
-    import numpy as np
-    try:
-        import faiss
-    except Exception:
-        faiss = None
-
-    try:
-        from sentence_transformers import SentenceTransformer
-    except Exception:
-        SentenceTransformer = None
-
-    try:
-        from fastembed import TextEmbedding as FastEmbedModel  # 如果没有 fastembed 也无所谓
-    except Exception:
-        FastEmbedModel = None
-
-    try:
-        from sklearn.feature_extraction.text import TfidfVectorizer
-    except Exception:
-        TfidfVectorizer = None
-
-    return np, faiss, SentenceTransformer, FastEmbedModel, TfidfVectorizer, None
-
-# ========== 向量召回(多后端:Sentence-Transformers → Fastembed → TF-IDF)==========
-@st.cache_resource(show_spinner=False)
-def get_embedder():
-    """
-    返回 (backend, encode):
-
-        - backend: 固定 "st"
-        - encode:  encode(texts: list[str]) -> np.ndarray[float32] (L2 归一化)
-
-    只使用 SentenceTransformer 句向量；
-    不再退回 TF-IDF，一旦失败直接报错。
-    """
-    import numpy as np
-
-    # 1) 导入 SentenceTransformer
-    try:
-        from sentence_transformers import SentenceTransformer
-    except Exception as e:
-        st.error(f"❌ 无法导入 sentence-transformers，请先安装依赖: {e}")
-        # 这里直接抛错，让调用方在日志里看到真实问题
-        raise RuntimeError("sentence-transformers not available") from e
-
-    # 2) 固定使用一个模型（你一直在用的那只）
-    model_name = "distiluse-base-multilingual-cased-v1"
-
-    try:
-        model = SentenceTransformer(model_name)
-    except Exception as e:
-        st.error(f"❌ 加载句向量模型 {model_name} 失败: {e}")
-        raise RuntimeError(f"failed to load sentence transformer model {model_name}") from e
-
-    # 3) 封装统一 encode 函数
-    def encode_st(texts: list[str]):
-        if not texts:
-            # 空输入时返回 (0, dim) 避免后面 shape 异常
-            dim = model.get_sentence_embedding_dimension()
-            return np.zeros((0, dim), dtype="float32")
-
-        emb = model.encode(
-            texts,
-            normalize_embeddings=True,
-            batch_size=32,
-            convert_to_numpy=True,
-        ).astype("float32")
-
-        # 双保险再归一化一次
-        norms = np.linalg.norm(emb, axis=1, keepdims=True) + 1e-12
-        return (emb / norms).astype("float32")
-
-    st.info(f"✅ 已启用 SentenceTransformer 句向量: {model_name}")
-    return "st", encode_st
-
-def _load_index(project_id: int):
-    np, faiss, *_ = _lazy_import_vec()
-    idx_path, map_path, vec_path = _index_paths(project_id)
-    mapping = []
-    if os.path.exists(map_path):
-        with open(map_path, "r", encoding="utf-8") as f:
-            mapping = json.load(f)
-    # FAISS
-    if faiss is not None and os.path.exists(idx_path):
-        index = faiss.read_index(idx_path)
-        return ("faiss", index, mapping, None)
-    # 回退:.npy
-    if os.path.exists(vec_path):
-        vecs = np.load(vec_path).astype("float32")
-        return ("fallback", None, mapping, vecs)
-
-    # 索引完全不存在
-    log_event(
-        "WARNING",
-        "semantic index not found",
-        project_id=project_id,
-        idx_path=idx_path,
-        vec_path=vec_path,
-    )
-    return ("none", None, mapping, None)
 
 
-def _save_index(project_id: int, mode: str, index, mapping, vecs=None):
-    np, faiss, *_ = _lazy_import_vec()
-    idx_path, map_path, vec_path = _index_paths(project_id)
-    if mode == "faiss" and index is not None:
-        faiss.write_index(index, idx_path)
-    elif mode == "fallback" and vecs is not None:
-        np.save(vec_path, vecs.astype("float32"))
-    with open(map_path, "w", encoding="utf-8") as f:
-        json.dump(mapping, f, ensure_ascii=False, indent=2)
-
-def _norm_domain_key(raw: str | None) -> str:
-    """将数据库中的 domain 统一为适合作为文件夹名的 key:
-    - None/空 → "未分类"
-    - 去掉首尾空格
-    - 替换掉路径中不允许的字符
-    """
-    s = (raw or "").strip()
-    if not s:
-        s = "未分类"
-    for ch in r'\\/:"*?<>|':
-        s = s.replace(ch, "_")
-    return s
-def _index_paths_domain(domain: str, kb_type: str):
-    """按“领域 + 类型”返回对应索引文件路径"""
-    domain_key = _norm_domain_key(domain)
-    base_dir = os.path.join(BASE_DIR, "semantic_index", domain_key, kb_type)
-    os.makedirs(base_dir, exist_ok=True)
-    idx_path = os.path.join(base_dir, "index.faiss")
-    map_path = os.path.join(base_dir, "mapping.json")
-    vec_path = os.path.join(base_dir, "vectors.npy")
-    return idx_path, map_path, vec_path
-
-
-def _load_index_domain(domain: str, kb_type: str):
-    """按“领域 + 类型”加载索引. 返回 (mode, index, mapping, vecs)"""
-    np, faiss, *_ = _lazy_import_vec()
-    idx_path, map_path, vec_path = _index_paths_domain(domain, kb_type)
-    mapping = []
-    if os.path.exists(map_path):
-        with open(map_path, "r", encoding="utf-8") as f:
-            mapping = json.load(f)
-    if faiss is not None and os.path.exists(idx_path):
-        index = faiss.read_index(idx_path)
-        return "faiss", index, mapping, None
-    if os.path.exists(vec_path):
-        vecs = np.load(vec_path).astype("float32")
-        return "fallback", None, mapping, vecs
-    return "none", None, mapping, None
-
-
-def _save_index_domain(domain: str, kb_type: str, mode: str, index, mapping, vecs=None):
-    np, faiss, *_ = _lazy_import_vec()
-    idx_path, map_path, vec_path = _index_paths_domain(domain, kb_type)
-    if mode == "faiss" and index is not None:
-        faiss.write_index(index, idx_path)
-        # 有旧的 numpy 索引就顺手删一下
-        if os.path.exists(vec_path):
-            try:
-                os.remove(vec_path)
-            except OSError:
-                pass
-    elif mode == "fallback" and vecs is not None:
-        np.save(vec_path, vecs.astype("float32"))
-        # 有旧的 faiss 索引就顺手删一下
-        if os.path.exists(idx_path):
-            try:
-                os.remove(idx_path)
-            except OSError:
-                pass
-    with open(map_path, "w", encoding="utf-8") as f:
-        json.dump(mapping, f, ensure_ascii=False, indent=2)
-def build_strategy_index_for_domain(domain: str):
-    """为指定领域重建【翻译策略】(strategy) 单语索引.
-
-    数据来源: strategy_texts 表, 每条记录视为一个“策略文段”。
-    索引单位: 以整段 content 为一条向量(如需更细粒度, 可以后续再按句子拆分).
-    """
-    import numpy as _np
-    np, faiss, *_ = _lazy_import_vec()
-    backend, encode = get_embedder()
-
-    dom = (domain or "").strip() or "未分类"
-
-    # 1) 确保策略表存在
-    cur.execute(
-        "CREATE TABLE IF NOT EXISTS strategy_texts ("
-        "id INTEGER PRIMARY KEY,"
-        "domain TEXT,"
-        "title TEXT,"
-        "content TEXT NOT NULL,"
-        "collection TEXT,"
-        "source TEXT,"
-        "created_at TEXT DEFAULT (datetime('now'))"
-        ");"
-    )
-    conn.commit()
-
-    # 2) 拉取该领域下的全部策略文本
-    rows = cur.execute(
-        """
-        SELECT id,
-               IFNULL(domain,''), IFNULL(title,''), content,
-               IFNULL(collection,''), IFNULL(source,'')
-          FROM strategy_texts
-         WHERE IFNULL(domain,'') = ?
-         ORDER BY id ASC
-        """,
-        (dom,)
-    ).fetchall()
-
-    texts, metas = [], []
-    for sid, d, ttl, content, coll, src in rows:
-        txt = (content or "").strip()
-        if not txt:
-            continue
-        texts.append(txt)
-        metas.append({
-            "strategy_id": sid,
-            "domain": d or dom,
-            "title": ttl,
-            "content_preview": txt[:200],
-            "collection": coll,
-            "source": src,
-            "kb_type": "strategy",
-        })
-
-    if not texts:
-        # 清空该领域下的策略索引
-        _save_index_domain(dom, "strategy", "none", None, [])
-        return {"added": 0, "total": 0}
-
-    # 3) 编码向量
-    new_vecs = encode(texts)
-    if hasattr(new_vecs, "toarray"):
-        new_vecs = new_vecs.toarray()
-    new_vecs = _np.asarray(new_vecs, dtype="float32")
-    if new_vecs.ndim == 1:
-        new_vecs = new_vecs.reshape(1, -1)
-    new_vecs = new_vecs / (_np.linalg.norm(new_vecs, axis=1, keepdims=True) + 1e-12)
-
-    # 4) 写入索引文件
-    if faiss is not None and backend in ("st", "fastembed"):
-        dim = int(new_vecs.shape[1])
-        index = faiss.IndexFlatIP(dim)
-        index.add(new_vecs)
-        _save_index_domain(dom, "strategy", "faiss", index, metas)
-        total = int(index.ntotal)
-    else:
-        vecs = new_vecs
-        _save_index_domain(dom, "strategy", "fallback", None, metas, vecs=vecs)
-        total = int(vecs.shape[0])
-
-    return {"added": len(texts), "total": total}
-
-def build_project_vector_index(project_id: int,
-                               use_src: bool = True,
-                               use_tgt: bool = True):
-    """
-    为指定项目所属【领域】重建向量索引(句对版，中英对照):
-
-    - 通过 project_id 找到该项目的 domain；
-    - 从 corpus 表中读取该领域下所有双语语料(不再按 project_id 限制)；
-    - 按句对对齐: split_sents(src) / split_sents(tgt)；
-    - 用“中文句子”作为检索向量文本；
-    - mapping 中保存: corpus_id, idx, src, tgt, project_id, domain, title, lang_pair, kb_type;
-    - 每次重建时，会覆盖该领域下的双语索引文件(semantic_index/{domain}/bilingual/)。
-
-    返回: {"added": 新增条数, "total": 索引总条数}
-    """
-    import numpy as _np
-    np, faiss, *_ = _lazy_import_vec()
-    backend, encode = get_embedder()
-
-    pid = int(project_id)
-
-    # 0) 根据项目取领域
-    proj_domain = None
-    try:
-        row = cur.execute(
-            "SELECT IFNULL(domain,'') FROM items WHERE id=?",
-            (pid,)
-        ).fetchone()
-        if row:
-            proj_domain = (row[0] or "").strip()
-    except Exception:
-        proj_domain = None
-
-    if not proj_domain:
-        # 没有设置领域时，归入“未分类”
-        proj_domain = "未分类"
-
-    # 1) 从 DB 读取该领域下的语料(不再按 project_id 限制)
-    rows = cur.execute(
-        """
-        SELECT c.id,
-               IFNULL(c.src_text, ''), IFNULL(c.tgt_text, ''),
-               IFNULL(c.title, ''),    IFNULL(c.lang_pair, ''),
-               IFNULL(c.project_id, 0), IFNULL(c.domain, '')
-        FROM corpus c
-        WHERE IFNULL(c.domain, '') = ?
-        ORDER BY c.id ASC
-        """,
-        (proj_domain,)
-    ).fetchall()
-
-    texts, metas = [], []
-
-    for cid, s, t, ttl, lp, pj, dom in rows:
-        s = (s or "").strip()
-        t = (t or "").strip()
-        if not s and not t:
-            continue
-
-        # 句子切分(尽量使用你已有的 split_sents)
-        try:
-            if "split_sents" in globals():
-                src_sents = split_sents(s, lang_hint="zh")
-                tgt_sents = split_sents(t, lang_hint="en")
-            else:
-                src_sents = (s.split("。") if s else [])
-                tgt_sents = (t.split(".") if t else [])
-        except Exception:
-            src_sents = (s.split("。") if s else [])
-            tgt_sents = (t.split(".") if t else [])
-
-        # 如果要求双向对齐，则取最小长度；否则只看 src
-        n = min(len(src_sents), len(tgt_sents)) if (use_src and use_tgt) else len(src_sents or [])
-
-        for idx in range(n):
-            src_j = (src_sents[idx] if idx < len(src_sents) else "").strip()
-            tgt_j = (tgt_sents[idx] if idx < len(tgt_sents) else "").strip()
-            if not src_j:
-                continue
-
-            texts.append(src_j)
-            metas.append({
-                "corpus_id": cid,
-                "idx": idx,
-                "src": src_j,
-                "tgt": tgt_j,
-                "project_id": pj,
-                "domain": dom or proj_domain or "",
-                "title": ttl,
-                "lang_pair": lp or "",
-                "kb_type": "bilingual",
-            })
-
-    if not texts:
-        # 该领域没有可用语料；清理索引文件，避免残留旧索引
-        try:
-            _save_index(pid, "none", None, [], vecs=None)
-        except Exception:
-            pass
-        return {"added": 0, "total": 0}
-
-    # 2) 编码 & 归一化
-    new_vecs = encode(texts)
-    if hasattr(new_vecs, "toarray"):
-        new_vecs = new_vecs.toarray()
-    new_vecs = _np.asarray(new_vecs, dtype="float32")
-    if new_vecs.ndim == 1:
-        new_vecs = new_vecs.reshape(1, -1)
-    new_vecs = new_vecs / (_np.linalg.norm(new_vecs, axis=1, keepdims=True) + 1e-12)
-
-    # 3) 直接重建索引(不再读取旧 mapping)
-    if faiss is not None and backend in ("st", "fastembed"):
-        dim = int(new_vecs.shape[1])
-        index = faiss.IndexFlatIP(dim)
-        index.add(new_vecs)
-        _save_index(pid, "faiss", index, metas)
-        total = int(index.ntotal)
-    else:
-        vecs = new_vecs
-        _save_index(pid, "fallback", None, metas, vecs=vecs)
-        total = int(vecs.shape[0])
-
-    return {"added": len(texts), "total": total}
-
-def rebuild_project_semantic_index(project_id: int) -> dict:
-    """
-    统一对外的“重建语义索引入口函数”。
-
-    用途：
-      - 在 Streamlit UI 之外的脚本里调用；
-      - 以后如果需要加日志 / 权限控制，只改这个函数即可。
-
-    参数：
-      project_id: 项目 ID（int 或可以转成 int 的字符串）
-
-    返回：
-      {"ok": True/False, "added": int, "total": int, "msg": str}
-    """
-    try:
-        pid = int(project_id)
-    except (TypeError, ValueError):
-        return {"ok": False, "added": 0, "total": 0, "msg": f"非法项目ID: {project_id!r}"}
-
-    try:
-        res = build_project_vector_index(pid, use_src=True, use_tgt=True)
-        return {
-            "ok": True,
-            "added": int(res.get("added", 0)),
-            "total": int(res.get("total", 0)),
-            "msg": "索引重建成功",
-        }
     except Exception as e:
         return {
             "ok": False,
@@ -1435,24 +703,6 @@ def rebuild_project_semantic_index(project_id: int) -> dict:
 # 语义召回(支持范围:project/domain/all)
 # 返回: [(score, meta, src_sent, tgt_sent)]
 # =========================
-def _get_domain_for_proj(cur, project_id: int) -> str | None:
-    """
-    根据项目ID获取项目领域(domain)，用于 scope="domain" 时过滤参考语料。
-    """
-    try:
-        row = cur.execute(
-            "SELECT IFNULL(domain,'') FROM items WHERE id=?",
-            (int(project_id),),
-        ).fetchone()
-    except Exception:
-        return None
-
-    if not row:
-        return None
-
-    dom = (row[0] or "").strip()
-    return dom or None
-
 def semantic_retrieve(project_id: int,
                       query_text: str,
                       topk: int = 20,
@@ -1695,172 +945,7 @@ def semantic_consistency_report(project_id: int,
     return pd.DataFrame(hits_all)
 
 # ========== 路径/DB ==========
-conn = sqlite3.connect(DB_PATH, check_same_thread=False)
-cur = conn.cursor()
-
-def ensure_domain_columns_and_backfill(conn, cur, corpus_table="corpus"):
-    # items.domain
-    cols = [r[1] for r in cur.execute("PRAGMA table_info(items)").fetchall()]
-    if "domain" not in cols:
-        cur.execute("ALTER TABLE items ADD COLUMN domain TEXT;")
-        conn.commit()
-
-    # 语料表 domain(如果你用 corpus_main 就把参数改成 corpus_main)
-    cols = [r[1] for r in cur.execute(f"PRAGMA table_info({corpus_table})").fetchall()]
-    if "domain" not in cols:
-        cur.execute(f"ALTER TABLE {corpus_table} ADD COLUMN domain TEXT;")
-        conn.commit()
-
-    # 回填:用 items.domain 补 corpus.domain(有 project_id 的行)
-    try:
-        cur.execute(f"""
-            UPDATE {corpus_table}
-            SET domain = (
-              SELECT i.domain FROM items i WHERE i.id = {corpus_table}.project_id
-            )
-            WHERE domain IS NULL AND project_id IS NOT NULL;
-        """)
-        conn.commit()
-    except Exception:
-        pass
-
-# 调用(老库表名是 corpus):
-ensure_domain_columns_and_backfill(conn, cur, corpus_table="corpus")
-# 若你已经切到 corpus_main / corpus_vec:
-# ensure_domain_columns_and_backfill(conn, cur, corpus_table="corpus_main")
-
-def _get_domain_for_proj(cur, project_id: int):
-    """
-    工具函数: 根据项目ID读取 items.domain; 若不存在或为空, 返回 None。
-    """
-    try:
-        row = cur.execute(
-            "SELECT domain FROM items WHERE id=?",
-            (int(project_id),)
-        ).fetchone()
-        if not row:
-            return None
-        val = (row[0] or "").strip()
-        return val or None
-    except Exception:
-        return None
-try:
-    cur.execute("CREATE INDEX IF NOT EXISTS idx_term_ext_project ON term_ext(project_id)")
-    conn.commit()
-except Exception as e:
-    print("索引创建跳过:", e)
-
-def _has_col(table: str, col: str) -> bool:
-    cur.execute(f"PRAGMA table_info({table})")
-    return any(r[1] == col for r in cur.fetchall())
-
-def ensure_col(table: str, col: str, col_type: str):
-    cur.execute(f"PRAGMA table_info({table})")
-    cols = {r[1] for r in cur.fetchall()}
-    if col not in cols:
-        cur.execute(f"ALTER TABLE {table} ADD COLUMN {col} {col_type}")
-
-# —— 建表
-cur.execute("""
-CREATE TABLE IF NOT EXISTS items (
-    id INTEGER PRIMARY KEY,
-    title TEXT NOT NULL,
-    body TEXT,
-    tags TEXT,
-    domain TEXT,
-    type TEXT,
-    created_at TEXT DEFAULT (datetime('now'))
-);
-""")
-
-cur.execute("""
-CREATE TABLE IF NOT EXISTS item_ext (
-    id INTEGER PRIMARY KEY,
-    item_id INTEGER,
-    src_path TEXT,
-    FOREIGN KEY(item_id) REFERENCES items(id)
-);
-""")
-
-cur.execute("""
-CREATE TABLE IF NOT EXISTS project_files (
-    id INTEGER PRIMARY KEY,
-    project_id INTEGER NOT NULL,
-    file_path TEXT NOT NULL,
-    file_name TEXT,
-    uploaded_at TEXT DEFAULT (datetime('now')),
-    note TEXT,
-    FOREIGN KEY(project_id) REFERENCES items(id)
-);
-""")
-
-cur.execute("""
-CREATE TABLE IF NOT EXISTS term_ext (
-    id INTEGER PRIMARY KEY,
-    source_term TEXT NOT NULL,
-    target_term TEXT,
-    domain TEXT,
-    project_id INTEGER,
-    strategy TEXT,
-    example TEXT,
-    category TEXT,
-    FOREIGN KEY(project_id) REFERENCES items(id)
-);
-""")
-
-cur.execute("""
-CREATE TABLE IF NOT EXISTS trans_ext (
-    id INTEGER PRIMARY KEY,
-    project_id INTEGER,
-    src_text TEXT,
-    tgt_text TEXT,
-    mode TEXT,
-    segment_count INTEGER,
-    created_at TEXT DEFAULT (datetime('now')),
-    FOREIGN KEY(project_id) REFERENCES items(id)
-);
-""")
-
-cur.execute("""
-CREATE TABLE IF NOT EXISTS corpus (
-    id INTEGER PRIMARY KEY,
-    project_id INTEGER,
-    text TEXT,
-    lang TEXT,
-    source TEXT,
-    created_at TEXT DEFAULT (datetime('now')),
-    FOREIGN KEY(project_id) REFERENCES items(id)
-);
-""")
-conn.commit()
-
-
-# —— 兜底补列
-for t, cols in {
-    "items": [("type","TEXT"),("tags","TEXT"),("scene","TEXT"),("prompt","TEXT"),
-              ("mode","TEXT"),("body","TEXT"),("created_at","TEXT"),("updated_at","TEXT"),("trans_type","TEXT")],
-    "item_ext": [("src_path","TEXT")],
-    "term_ext": [("domain","TEXT"),("project_id","INTEGER"),("strategy","TEXT"),
-                 ("example","TEXT"),("note","TEXT"), ("category","TEXT")],
-    "trans_ext": [("stats_json","TEXT"),("segments","INTEGER"),("term_hit_total","INTEGER")],
-    "corpus": [("title","TEXT"),("project_id","INTEGER"),("lang_pair","TEXT"),("src_text","TEXT"),("tgt_text","TEXT"),("note","TEXT"),("created_at","TEXT")],
-}.items():
-    for c, tp in cols:
-        ensure_col(t, c, tp)
-cur.execute("UPDATE items SET type='project' WHERE IFNULL(type,'')=''")
-cur.execute("UPDATE items SET created_at = COALESCE(created_at, strftime('%Y-%m-%d %H:%M:%S','now'))")
-conn.commit()
-ensure_col("term_ext", "example_vector_id", "INTEGER")
-
-# --- 术语表字段兼容:缺少 project_id 时补建 ---
-try:
-    cur.execute("PRAGMA table_info(term_ext)")
-    cols = [c[1] for c in cur.fetchall()]
-    if "project_id" not in cols:
-        cur.execute("ALTER TABLE term_ext ADD COLUMN project_id INTEGER")
-        conn.commit()
-except Exception as e:
-    st.warning(f"术语表结构检查:{e}")
+conn, cur = init_db()
 
 # ========== DeepSeek 参数/调用 ==========
 def get_deepseek():
@@ -1986,8 +1071,12 @@ def build_term_hint(term_dict: dict, lang_pair: str, max_terms: int = 80) -> str
       { "contract": "合同" }
       { "contract": {"target":"合同", "pos":"NOUN", "usage_note":"法律语境"} }
       { "contract": ("合同", "NOUN") }   # 元组形式 (target, pos)
-    空目标会被忽略;自动去重并最多输出 max_terms 条.避免提示过长。
+    空/非 dict 的输入会被安全忽略; 空目标会被忽略; 自动去重并最多输出
+    max_terms 条，避免提示过长。
     """
+    if not term_dict or not isinstance(term_dict, dict):
+        return ""
+
     lines = []
     seen = set()
     items = list(term_dict.items())[: max_terms * 2]  # 稍多取一些.过滤空后再截断
@@ -2033,21 +1122,47 @@ def build_term_hint(term_dict: dict, lang_pair: str, max_terms: int = 80) -> str
 def build_instruction(lang_pair: str) -> str:
     """
     生成简洁的翻译指令。你也可以按项目风格再扩展。
+
+    - 支持中文与英文写法（如 "Chinese to English"/"English→Chinese"）。
+    - 统一把各种箭头/连字符/"to" 转成 "-"，便于模式匹配。
     """
-    lp = (lang_pair or "").replace(" ", "")
-    if "中→英" in lp or "中->英" in lp or "zh" in lp.lower() and "en" in lp.lower():
+    lp_raw = (lang_pair or "").replace(" ", "")
+    lp_norm = lp_raw.lower()
+    for sep in ("→", "->", "=>", "—>", "—", "—", "—-", "——"):
+        lp_norm = lp_norm.replace(sep, "-")
+    lp_norm = (
+        lp_norm.replace("to", "-")
+        .replace("_", "-")
+        .replace("/", "-")
+    )
+
+    zh_to_en_tokens = (
+        "中译英", "中→英", "中->英", "中-英", "zh-en", "zh2en", "zh_en", "zh-en",
+        "chinese-english", "chinese-en", "zh-english",
+    )
+    en_to_zh_tokens = (
+        "英译中", "英→中", "英->中", "英-中", "en-zh", "en2zh", "en_zh", "en-zh",
+        "english-chinese", "english-zh", "en-chinese",
+    )
+
+    def _match(tokens: tuple[str, ...]) -> bool:
+        return any(tok in lp_raw or tok in lp_norm for tok in tokens)
+
+    if _match(zh_to_en_tokens):
         return (
             "Translate the source text from Chinese to English. "
             "Use a professional, natural style; follow the GLOSSARY (STRICT) exactly; "
             "preserve proper nouns and numbers; keep paragraph structure. "
             "Do not add explanations."
         )
-    if "英→中" in lp or "英->中" in lp or "en" in lp.lower() and "zh" in lp.lower():
+
+    if _match(en_to_zh_tokens):
         return (
             "Translate the source text from English to Chinese. "
             "用专业、通顺、符合领域文体的中文表达;严格遵守上方 GLOSSARY (STRICT);"
             "专有名词、数字与计量单位保持准确;段落结构保持一致。不得添加解释。"
         )
+
     # 兜底
     return (
         "Translate the source text. Follow the GLOSSARY (STRICT) exactly. "
@@ -2063,7 +1178,7 @@ def ds_translate(
     ref_context: str = "",
     fewshot_examples=None,
 ) -> str:
-    term_hint = build_term_hint(term_dict, lang_pair)  # 你现有的术语提示
+    term_hint = build_term_hint(term_dict, lang_pair)  # 统一使用严格术语提示
     instr = build_instruction(lang_pair)   # type: ignore
 
     """
@@ -2074,22 +1189,23 @@ def ds_translate(
     if not block.strip():
         return ""
 
-    if term_dict:
-        term_lines = "\n".join([f"- {k} -> {v}" for k, v in term_dict.items()])
-        term_hint = (
-            "TERMINOLOGY:\n"
-            "Use the following mappings EXACTLY and consistently. Do not invent alternatives.\n"
-            f"{term_lines}\n"
-        )
-    else:
-        term_hint = "TERMINOLOGY:\nEnsure consistent terminology; avoid paraphrasing fixed terms.\n"
+    # 如果术语为空，为了让提示始终包含 GLOSSARY 段落，给出一个安全的兜底
+    if not term_hint:
+        if term_dict:
+            # 术语字典存在但内容被过滤为空，给出简洁的默认提示
+            term_hint = (
+                "GLOSSARY (STRICT):\n"
+                "- Follow provided terminology exactly; do not paraphrase fixed terms.\n\n"
+            )
+        else:
+            term_hint = (
+                "GLOSSARY (STRICT):\n"
+                "- Ensure consistent terminology; avoid paraphrasing fixed terms.\n\n"
+            )
 
-    if lang_pair == "中译英":
-        instr = "Translate the Chinese text into English with high fidelity and formal style."
-    elif lang_pair == "英译中":
-        instr = "将下列英文准确译为中文.语体正式、专业。"
-    else:
-        instr = "Translate accurately into the other language."
+    # 保证与后续 INSTRUCTION 块之间有空行
+    if not term_hint.endswith("\n\n"):
+        term_hint = term_hint.rstrip("\n") + "\n\n"
 
     system_msg = (
         "You are a senior professional translator. Prioritize accuracy, faithfulness, and consistent terminology. "
@@ -2293,15 +1409,150 @@ def translate_block_with_kb(
         "violated_terms": violated,
     }
 
-def ds_extract_terms(text: str, ak: str, model: str, src_lang: str = "zh", tgt_lang: str = "en"):
-    """
-    用 DeepSeek 从文本中抽取术语对.返回 JSON 数组:
-    [{"source_term":"...", "target_term":"...", "domain":"...", "strategy":"...", "example":"..."}]
-    """
-    import requests
-
-    if not text.strip():
+def _split_sentences_for_terms(text: str) -> list[str]:
+    """用于术语示例抽取的轻量分句，兼容中英文标点。"""
+    if not text:
         return []
+    txt = _norm_text(text)
+    if not txt:
+        return []
+    parts = re.split(r"(?<=[。！？；.!?])\s+|\n+", txt)
+    return [p.strip() for p in parts if p.strip()]
+
+
+def _locate_example_pair(example: str | None, src_full: str | None, tgt_full: str | None):
+    """
+    在翻译历史中为示例句找到可能的对齐译文。
+    返回 (src_example, tgt_example or None)。
+    """
+    if not example:
+        return None, None
+
+    ex = example.strip()
+    if not ex:
+        return None, None
+
+    src_sents = split_sents(src_full or "", prefer_newline=True, min_char=2)
+    tgt_sents = split_sents(tgt_full or "", prefer_newline=True, min_char=1)
+
+    match_idx = None
+    for i, s in enumerate(src_sents):
+        if ex in s:
+            match_idx = i
+            break
+
+    if match_idx is None:
+        return ex, None
+
+    tgt = tgt_sents[match_idx] if match_idx < len(tgt_sents) else None
+    return ex, tgt or None
+
+
+def extract_terms_with_corpus_model(
+    text: str,
+    *,
+    max_terms: int = 30,
+    src_lang: str = "zh",
+    tgt_lang: str = "en",
+    default_domain: str | None = None,
+):
+    """
+    使用与语料库向量检索同一套模型(distiluse-base-multilingual-cased-v1)做术语提取。
+
+    逻辑:
+    1) 借助正则从文本中抓取中英术语候选(2-8 字中文、1-3 词英文短语)。
+    2) 用 get_embedder() 返回的句向量模型对全文和候选做向量化，按相似度选出代表性术语。
+    3) 结构化返回字段与原 DeepSeek 提示保持一致(source/target/domain/strategy/example)。
+    """
+
+    txt = (text or "").strip()
+    if not txt:
+        return []
+
+    backend, encode = get_embedder()
+
+    def _dedup_keep(seq):
+        seen = set()
+        out = []
+        for x in seq:
+            if x in seen:
+                continue
+            seen.add(x)
+            out.append(x)
+        return out
+
+    zh_candidates = re.findall(r"[\u4e00-\u9fa5]{2,8}", txt)
+    en_candidates = re.findall(r"[A-Za-z][A-Za-z\-]{2,}(?: [A-Za-z\-]{2,}){0,2}", txt)
+    candidates = _dedup_keep(zh_candidates + en_candidates)
+    if not candidates:
+        return []
+
+    doc_emb = encode([txt])[0]
+    cand_emb = encode(candidates)
+    scores = cand_emb @ doc_emb
+
+    ranked = sorted(zip(candidates, scores.tolist()), key=lambda x: x[1], reverse=True)[:max_terms]
+    sents = _split_sentences_for_terms(txt)
+
+    def _example_for(term: str):
+        for s in sents:
+            if term in s:
+                return s
+        return None
+
+    out = []
+    domain_val = (default_domain or "").strip() or "其他"
+
+    for term, sc in ranked:
+        out.append(
+            {
+                "source_term": term,
+                # 现阶段缺少统一的自动译法，保持字段齐全以便后续人工/模型补全
+                "target_term": None,
+                "domain": domain_val,
+                "strategy": None,
+                "example": _example_for(term),
+                "score": float(sc),
+                "model": backend,
+                "src_lang": src_lang,
+                "tgt_lang": tgt_lang,
+            }
+        )
+    return out
+
+
+def ds_extract_terms(
+    text: str,
+    ak: str,
+    model: str,
+    src_lang: str = "zh",
+    tgt_lang: str = "en",
+    *,
+    prefer_corpus_model: bool = True,
+    default_domain: str | None = None,
+):
+    """术语提取：优先走语料库同款向量模型，失败时再回退 DeepSeek Prompt。"""
+
+    txt = (text or "").strip()
+    if not txt:
+        return []
+
+    if prefer_corpus_model:
+        try:
+            return extract_terms_with_corpus_model(
+                txt,
+                max_terms=30,
+                src_lang=src_lang,
+                tgt_lang=tgt_lang,
+                default_domain=default_domain,
+            )
+        except Exception as e:
+            log_event("ERROR", "corpus-model term extraction failed", error=str(e))
+
+    if not ak:
+        return []
+
+    import requests
 
     system_msg = (
         "You are a terminology mining assistant. Extract high-value bilingual term pairs suitable for a project glossary. "
@@ -2352,7 +1603,7 @@ Text:
         for o in arr:
             src = (o.get("source_term") or o.get("source") or "").strip()
             tgt = (o.get("target_term") or o.get("target") or "").strip()
-            dom = (o.get("domain") or "").strip() or None
+            dom = (o.get("domain") or "").strip() or (default_domain or None)
             strat = (o.get("strategy") or "").strip() or None
             ex = (o.get("example") or "").strip() or None
             if src:
@@ -2572,6 +1823,17 @@ def split_sents(
     # 过滤过短片段
     return [x for x in pieces if len(x) >= min_char]
 
+
+def _split_pair_for_index(src_text: str, tgt_text: str) -> tuple[list[str], list[str]]:
+    """供索引重建使用的句对切分辅助。"""
+
+    try:
+        return split_sents(src_text, lang_hint="zh"), split_sents(tgt_text, lang_hint="en")
+    except Exception:
+        src_sents = src_text.split("。") if src_text else []
+        tgt_sents = tgt_text.split(".") if tgt_text else []
+        return src_sents, tgt_sents
+
 # 兼容旧函数名
 split_sentences = split_sents
 
@@ -2698,7 +1960,7 @@ def import_corpus_from_upload(
 
         # 可选：导入后重建当前项目语义索引
         if build_after_import and pid:
-            res_idx = rebuild_project_semantic_index(pid)
+            res_idx = rebuild_project_semantic_index(cur, pid, split_fn=_split_pair_for_index)
             if res_idx.get("ok"):
                 st.success(
                     f"🧠 向量索引已更新: 新增 {res_idx['added']}，总量 {res_idx['total']}。"
@@ -2735,7 +1997,7 @@ def import_corpus_from_upload(
         st.success(f"✅ 已写入语料库 {ins} 条。")
 
         if build_after_import and pid:
-            res_idx = rebuild_project_semantic_index(pid)
+            res_idx = rebuild_project_semantic_index(cur, pid, split_fn=_split_pair_for_index)
             if res_idx.get("ok"):
                 st.success(
                     f"🧠 向量索引已更新: 新增 {res_idx['added']}，总量 {res_idx['total']}。"
@@ -3007,7 +2269,9 @@ def render_term_management(st, cur, conn, base_dir, key_prefix="term"):
                         st.rerun()
 
                 with c3:
-                    proj_opts = cur.execute("SELECT id, title FROM items ORDER BY id DESC").fetchall()
+                    proj_opts = cur.execute(
+                        "SELECT id, title FROM items WHERE COALESCE(type,'')='project' ORDER BY id DESC"
+                    ).fetchall()
                     proj_map = {"(不挂接/置空)": None, **{f"#{i} {t}": i for (i, t) in proj_opts}}
 
                     cc3a, cc3b = st.columns([2, 1])
@@ -3434,60 +2698,90 @@ def render_term_management(st, cur, conn, base_dir, key_prefix="term"):
         st.markdown("#### 从翻译历史记录抽取术语(DeepSeek)")
         ak, model = get_deepseek()
         if not ak:
-            st.warning("未检测到 DeepSeek Key.请先在“设置”中配置。")
+            st.info("未检测到 DeepSeek Key，将直接使用语料库同款模型做结构化术语抽取。")
+
+        mode_pick = st.radio(
+            "选择来源",
+            ["按项目抽取(合并多条)", "按单条记录抽取"],
+            horizontal=True,
+            key=sk5("ext_mode"),
+        )
+        if mode_pick == "按项目抽取(合并多条)":
+            pid_ext = st.text_input("项目ID", key=sk5("ext_pid"))
+            max_chars = st.number_input("采样最大字符数", 1000, 20000, 5000, 500, key=sk5("ext_max"))
+            if st.button("开始抽取", key=sk5("ext_go_proj")):
+                if pid_ext.isdigit():
+                    rows = cur.execute(
+                        "SELECT src_path, output_text FROM trans_ext WHERE project_id=? ORDER BY id DESC LIMIT 10",
+                        (int(pid_ext),),
+                    ).fetchall()
+                    buf = []
+                    total = 0
+                    for sp, ot in rows:
+                        src = read_source_file(sp) if sp else ""
+                        txt = (src + "\n" + (ot or "")).strip()
+                        if not txt:
+                            continue
+                        if total + len(txt) > int(max_chars):
+                            remain = max(0, int(max_chars) - total)
+                            buf.append(txt[:remain])
+                            break
+                        else:
+                            buf.append(txt)
+                            total += len(txt)
+                    big = "\n\n".join(buf)
+                    big = "\n\n".join(buf)
+
+                    # ✅ 先看这个项目到底有没有可用的历史文本
+                    if not big.strip():
+                        st.warning("该项目下没有可用的翻译历史文本，无法抽取术语。")
+                        return
+
+                    # 调试用:你可以先看看采样了多少字、前几行是什么
+                    st.write({
+                        "history_rows": len(rows),
+                        "sample_chars": len(big),
+                        "sample_preview": big[:300]
+                    })
+
+                    try:
+                        res = ds_extract_terms(big, ak, model, src_lang="zh", tgt_lang="en", prefer_corpus_model=True)
+                    except Exception as e:
+                        st.error(f"调用术语抽取时出错: {e}")
+                        return
+
+                    # 调试用:先看一下原始结果长什么样
+                    st.write({"extract_result_preview": str(res)[:500]})
+                    if not res:
+                        st.info("未抽取到术语或解析失败")
+                    else:
+                        st.success(f"抽取到 {len(res)} 条.准备批量写入……")
+                        ins = 0
+                        for o in res:
+                            cur.execute(
+                                "INSERT INTO term_ext (source_term, target_term, domain, project_id, strategy, example) VALUES (?, ?, ?, ?, ?, ?)",
+                                (o["source_term"], o.get("target_term") or None, o.get("domain"), int(pid_ext), o.get("strategy"), o.get("example")),
+                            )
+                            ins += 1
+                        conn.commit()
+                        st.success(f"✅ 已写入术语库 {ins} 条")
+                else:
+                    st.warning("请输入数字型项目ID")
         else:
-            mode_pick = st.radio(
-                "选择来源",
-                ["按项目抽取(合并多条)", "按单条记录抽取"],
-                horizontal=True,
-                key=sk5("ext_mode"),
-            )
-            if mode_pick == "按项目抽取(合并多条)":
-                pid_ext = st.text_input("项目ID", key=sk5("ext_pid"))
-                max_chars = st.number_input("采样最大字符数", 1000, 20000, 5000, 500, key=sk5("ext_max"))
-                if st.button("开始抽取", key=sk5("ext_go_proj")):
-                    if pid_ext.isdigit():
-                        rows = cur.execute(
-                            "SELECT src_path, output_text FROM trans_ext WHERE project_id=? ORDER BY id DESC LIMIT 10",
-                            (int(pid_ext),),
-                        ).fetchall()
-                        buf = []
-                        total = 0
-                        for sp, ot in rows:
-                            src = read_source_file(sp) if sp else ""
-                            txt = (src + "\n" + (ot or "")).strip()
-                            if not txt:
-                                continue
-                            if total + len(txt) > int(max_chars):
-                                remain = max(0, int(max_chars) - total)
-                                buf.append(txt[:remain])
-                                break
-                            else:
-                                buf.append(txt)
-                                total += len(txt)
-                        big = "\n\n".join(buf)
-                        big = "\n\n".join(buf)
-
-                        # ✅ 先看这个项目到底有没有可用的历史文本
-                        if not big.strip():
-                            st.warning("该项目下没有可用的翻译历史文本，无法抽取术语。")
-                            return
-
-                        # 调试用:你可以先看看采样了多少字、前几行是什么
-                        st.write({
-                            "history_rows": len(rows),
-                            "sample_chars": len(big),
-                            "sample_preview": big[:300]
-                        })
-
-                        try:
-                            res = ds_extract_terms(big, ak, model, src_lang="zh", tgt_lang="en")
-                        except Exception as e:
-                            st.error(f"调用 DeepSeek 抽取术语时出错: {e}")
-                            return
-
-                        # 调试用:先看一下原始结果长什么样
-                        st.write({"extract_result_preview": str(res)[:500]})
+            rid_ext = st.text_input("历史记录ID", key=sk5("ext_rid"))
+            if st.button("开始抽取", key=sk5("ext_go_rec")):
+                if rid_ext.isdigit():
+                    row = cur.execute(
+                        "SELECT src_path, output_text, project_id FROM trans_ext WHERE id=?",
+                        (int(rid_ext),),
+                    ).fetchone()
+                    if not row:
+                        st.warning("未找到该记录")
+                    else:
+                        sp, ot, pid0 = row
+                        src = read_source_file(sp) if sp else ""
+                        big = (src + "\n" + (ot or "")).strip()
+                        res = ds_extract_terms(big, ak, model, src_lang="zh", tgt_lang="en", prefer_corpus_model=True)
                         if not res:
                             st.info("未抽取到术语或解析失败")
                         else:
@@ -3496,41 +2790,11 @@ def render_term_management(st, cur, conn, base_dir, key_prefix="term"):
                             for o in res:
                                 cur.execute(
                                     "INSERT INTO term_ext (source_term, target_term, domain, project_id, strategy, example) VALUES (?, ?, ?, ?, ?, ?)",
-                                    (o["source_term"], o.get("target_term") or None, o.get("domain"), int(pid_ext), o.get("strategy"), o.get("example")),
+                                    (o["source_term"], o.get("target_term") or None, o.get("domain"), pid0, o.get("strategy"), o.get("example")),
                                 )
                                 ins += 1
                             conn.commit()
-                            st.success(f"✅ 已写入术语库 {ins} 条")
-                    else:
-                        st.warning("请输入数字型项目ID")
-            else:
-                rid_ext = st.text_input("历史记录ID", key=sk5("ext_rid"))
-                if st.button("开始抽取", key=sk5("ext_go_rec")):
-                    if rid_ext.isdigit():
-                        row = cur.execute(
-                            "SELECT src_path, output_text, project_id FROM trans_ext WHERE id=?",
-                            (int(rid_ext),),
-                        ).fetchone()
-                        if not row:
-                            st.warning("未找到该记录")
-                        else:
-                            sp, ot, pid0 = row
-                            src = read_source_file(sp) if sp else ""
-                            big = (src + "\n" + (ot or "")).strip()
-                            res = ds_extract_terms(big, ak, model, src_lang="zh", tgt_lang="en")
-                            if not res:
-                                st.info("未抽取到术语或解析失败")
-                            else:
-                                st.success(f"抽取到 {len(res)} 条.准备批量写入……")
-                                ins = 0
-                                for o in res:
-                                    cur.execute(
-                                        "INSERT INTO term_ext (source_term, target_term, domain, project_id, strategy, example) VALUES (?, ?, ?, ?, ?, ?)",
-                                        (o["source_term"], o.get("target_term") or None, o.get("domain"), pid0, o.get("strategy"), o.get("example")),
-                                    )
-                                    ins += 1
-                                conn.commit()
-                                st.success(f"✅ 已写入术语库 {ins} 条(project_id={pid0})")
+                            st.success(f"✅ 已写入术语库 {ins} 条(project_id={pid0})")
 
     # —— 分类管理
     with sub_tabs[6]:
@@ -3690,7 +2954,7 @@ def render_index_manager_by_domain(st, conn, cur):
                 total_sum = 0
                 for pid in proj_ids:
                     try:
-                        res = build_project_vector_index(int(pid))
+                        res = build_project_vector_index(cur, int(pid), split_fn=_split_pair_for_index)
                         added_sum += res.get("added", 0)
                         total_sum = res.get("total", total_sum)
                     except Exception as e:
@@ -3832,22 +3096,25 @@ if choice.startswith("📂"):
                 except Exception as e:
                     st.error(f"❌ 创建项目失败: {e}")
 
-    rows = cur.execute("""
+    rows = cur.execute(
+        """
         SELECT
             i.id,
             i.title,
-            COALESCE(i.tags,'')         AS tags,
-            COALESCE(e.src_path,'')     AS src_path,
-            COALESCE(i.created_at,'')   AS created_at,
-            COALESCE(i.scene,'')        AS scene,
-            COALESCE(i.prompt,'')       AS prompt,
-            COALESCE(i.mode,'')         AS mode,
-            COALESCE(i.trans_type,'')   AS trans_type
+            COALESCE(i.tags,'')              AS tags,
+            COALESCE(MIN(e.src_path),'')     AS src_path,
+            COALESCE(i.created_at,'')        AS created_at,
+            COALESCE(i.scene,'')             AS scene,
+            COALESCE(i.prompt,'')            AS prompt,
+            COALESCE(i.mode,'')              AS mode,
+            COALESCE(i.trans_type,'')        AS trans_type
         FROM items i
         LEFT JOIN item_ext e ON e.item_id = i.id
         WHERE COALESCE(i.type,'')='project'
+        GROUP BY i.id
         ORDER BY i.id DESC
-    """).fetchall()
+        """
+    ).fetchall()
 
     if not rows:
         st.info("暂无项目")
@@ -4235,6 +3502,7 @@ elif choice.startswith("📊"):
             # 项目标题(做语料标题/展示)
             ttl_row = cur.execute("SELECT IFNULL(title,'') FROM items WHERE id=?", (pid,)).fetchone()
             proj_title = (ttl_row or [""])[0] or f"project#{pid}"
+            proj_domain = _project_domain(pid, cur)
 
             with st.expander(f"#{rid}｜项目 {pid}｜{proj_title}｜{lp}｜{ts}", expanded=False):
                 # 译文全文 & 源文件路径
@@ -4295,7 +3563,7 @@ elif choice.startswith("📊"):
                             conn.commit()
 
                             # 再重建该项目的语义索引
-                            res_idx = rebuild_project_semantic_index(pid)
+                            res_idx = rebuild_project_semantic_index(cur, pid, split_fn=_split_pair_for_index)
                             if res_idx.get("ok"):
                                 st.success(
                                     f"✅ 已写入语料库并重建索引: 新增 {res_idx['added']} 条, 总量 {res_idx['total']} 条"
@@ -4305,35 +3573,69 @@ elif choice.startswith("📊"):
                                     f"已写入语料库，但重建索引失败: {res_idx.get('msg','未知错误')}"
                                 )
 
-                # 2) 提取术语(走你现有的 DeepSeek 抽取函数)
+                # 2) 提取术语(优先语料库同款模型，缺省回退 DeepSeek)
                 with c2:
                     if st.button("🧠 提取术语", key=f"hist_extract_terms_{rid}"):
                         ak, model = get_deepseek()
                         if not ak:
-                            st.warning("未检测到 DeepSeek Key(请到“设置”页配置)")
+                            st.info("未检测到 DeepSeek Key，将仅使用语料库同款模型进行抽取。")
+
+                        # 合并原文+译文.提高候选质量
+                        big = ((src_full or "") + "\n" + (tgt_full or "")).strip()
+                        res = ds_extract_terms(
+                            big,
+                            ak,
+                            model,
+                            src_lang="zh",
+                            tgt_lang="en",
+                            prefer_corpus_model=True,
+                            default_domain=proj_domain,
+                        )
+                        res, dup_terms = dedup_terms_against_db(cur, res, pid)
+                        if not res:
+                            st.info("未抽取到术语或解析失败")
                         else:
-                            # 合并原文+译文.提高候选质量
-                            big = ((src_full or "") + "\n" + (tgt_full or "")).strip()
-                            res = ds_extract_terms(big, ak, model, src_lang="zh", tgt_lang="en")
-                            if not res:
-                                st.info("未抽取到术语或解析失败")
-                            else:
-                                ins = 0
-                                for o in res:
-                                    cur.execute("""
-                                        INSERT INTO term_ext (source_term, target_term, domain, project_id, strategy, example)
-                                        VALUES (?, ?, ?, ?, ?, ?)
-                                    """, (
-                                        o.get("source_term") or "",
-                                        (o.get("target_term") or None),
-                                        (o.get("domain") or None),
-                                        pid,
-                                        (o.get("strategy") or "history-extract"),
-                                        (o.get("example") or None),
-                                    ))
-                                    ins += 1
-                                conn.commit()
-                                st.success(f"✅ 已写入术语库 {ins} 条")
+                            ins_term = ins_corpus = 0
+                            for o in res:
+                                domain_val = (o.get("domain") or proj_domain or "其他")
+                                strategy_val = (o.get("strategy") or "history-extract")
+                                cur.execute("""
+                                    INSERT INTO term_ext (source_term, target_term, domain, project_id, strategy, example)
+                                    VALUES (?, ?, ?, ?, ?, ?)
+                                """, (
+                                    o.get("source_term") or "",
+                                    (o.get("target_term") or None),
+                                    domain_val,
+                                    pid,
+                                    strategy_val,
+                                    (o.get("example") or None),
+                                ))
+                                ins_term += 1
+
+                                src_ex, tgt_ex = _locate_example_pair(o.get("example"), src_full, tgt_full)
+                                if src_ex:
+                                    cur.execute(
+                                        """
+                                        INSERT INTO corpus(title, project_id, lang_pair, src_text, tgt_text, note, domain, source, created_at)
+                                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+                                        """,
+                                        (
+                                            f"{proj_title} · term#{rid}",
+                                            pid,
+                                            lp or "",
+                                            src_ex,
+                                            tgt_ex,
+                                            "term-example",
+                                            domain_val,
+                                            "history-term",
+                                        ),
+                                    )
+                                    ins_corpus += 1
+                            conn.commit()
+                            msg = f"✅ 已写入术语库 {ins_term} 条，同步语料库 {ins_corpus} 条"
+                            if dup_terms:
+                                msg += f"；跳过重复 {len(dup_terms)} 条"
+                            st.success(msg)
 
                 # 3) 下载双语对照(CSV / DOCX)
                 with c3:
@@ -4398,8 +3700,9 @@ elif choice.startswith("📚"):
 
     render_corpus_manager(st, cur, conn)
 
-    _ensure_project_ref_map()
-    _ensure_project_switch_map()
+    # 初始化 Few-shot 状态字典
+    get_project_ref_ids(None)
+    get_project_fewshot_enabled(None)
     st.session_state.setdefault("corpus_target_project", None)
     st.session_state.setdefault("corpus_target_label", "(请选择 Few-shot 目标项目)")
 
@@ -4545,7 +3848,7 @@ elif choice.startswith("📚"):
         if only_build_now:
             # 仅重建当前项目的语义索引(不导入新语料)
             if pid:
-                res_idx = rebuild_project_semantic_index(pid)
+                res_idx = rebuild_project_semantic_index(cur, pid, split_fn=_split_pair_for_index)
                 if res_idx.get("ok"):
                     st.success(
                         f"🧠 索引已重建: 新增 {res_idx['added']}，总量 {res_idx['total']}。"
@@ -4731,7 +4034,15 @@ elif choice.startswith("📚"):
         st.subheader("🧠 语义索引管理 & 召回测试")
 
         # 选择项目
-        proj_rows = cur.execute("SELECT id, title FROM items ORDER BY id DESC LIMIT 200").fetchall()
+        proj_rows = cur.execute(
+            """
+            SELECT id, title
+            FROM items
+            WHERE COALESCE(type,'')='project'
+            ORDER BY id DESC
+            LIMIT 200
+            """
+        ).fetchall()
         proj_map = {"(请选择)": None}
         proj_map.update({f"[{i}] {t}": i for (i, t) in proj_rows})
         proj_sel = st.selectbox("选择要测试/重建索引的项目", list(proj_map.keys()), key=sk("vec_proj"))
@@ -4768,7 +4079,7 @@ elif choice.startswith("📚"):
         with c_build1:
             if st.button("构建/更新该项目索引", key=sk("build_idx_btn")):
                 if pid_sel:
-                    res_idx = rebuild_project_semantic_index(pid_sel)
+                    res_idx = rebuild_project_semantic_index(cur, pid_sel, split_fn=_split_pair_for_index)
                     if res_idx.get("ok"):
                         st.success(
                             f"索引已更新: 新增 {res_idx['added']}，总量 {res_idx['total']}。"
