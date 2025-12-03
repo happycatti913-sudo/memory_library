@@ -100,6 +100,56 @@ def _project_domain(pid: int | None) -> str | None:
     except Exception:
         return None
 
+
+def dedup_terms_against_db(
+    cur,
+    terms: list[dict],
+    project_id: int | None,
+):
+    """
+    按 (source_term, domain) 去重，过滤已存在或本次重复的术语。
+
+    - 与 term_ext 中同一项目或全局术语重复时跳过。
+    - domain 为空时按空串参与去重，确保同源术语仅保留一次。
+    返回 (filtered, skipped)。
+    """
+
+    if not terms:
+        return [], []
+
+    try:
+        rows = cur.execute(
+            """
+            SELECT source_term, domain
+            FROM term_ext
+            WHERE project_id IS NULL OR project_id = ?
+            """,
+            (project_id if project_id is not None else -1,),
+        ).fetchall()
+    except Exception:
+        rows = []
+
+    existing = {
+        ((s or "").strip().lower(), (d or "").strip().lower())
+        for s, d in rows
+        if (s or "").strip()
+    }
+
+    filtered, skipped = [], []
+    for item in terms:
+        src = (item.get("source_term") or "").strip()
+        dom = (item.get("domain") or "").strip()
+        if not src:
+            skipped.append(item)
+            continue
+        key = (src.lower(), dom.lower())
+        if key in existing:
+            skipped.append(item)
+            continue
+        existing.add(key)
+        filtered.append(item | {"source_term": src, "domain": dom})
+    return filtered, skipped
+
 # ======== 轻量日志机制 ========
 LOG_DIR = os.path.join(BASE_DIR, "logs")
 os.makedirs(LOG_DIR, exist_ok=True)
@@ -4480,6 +4530,7 @@ elif choice.startswith("📊"):
                             prefer_corpus_model=True,
                             default_domain=proj_domain,
                         )
+                        res, dup_terms = dedup_terms_against_db(cur, res, pid)
                         if not res:
                             st.info("未抽取到术语或解析失败")
                         else:
@@ -4520,7 +4571,10 @@ elif choice.startswith("📊"):
                                     )
                                     ins_corpus += 1
                             conn.commit()
-                            st.success(f"✅ 已写入术语库 {ins_term} 条，同步语料库 {ins_corpus} 条")
+                            msg = f"✅ 已写入术语库 {ins_term} 条，同步语料库 {ins_corpus} 条"
+                            if dup_terms:
+                                msg += f"；跳过重复 {len(dup_terms)} 条"
+                            st.success(msg)
 
                 # 3) 下载双语对照(CSV / DOCX)
                 with c3:
