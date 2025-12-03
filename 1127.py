@@ -88,6 +88,18 @@ def _index_paths(project_id: int):
 
     return idx_path, map_path, vec_path
 
+
+def _project_domain(pid: int | None) -> str | None:
+    """安全获取项目的领域标签。"""
+    if not pid:
+        return None
+    try:
+        row = cur.execute("SELECT IFNULL(domain,'') FROM items WHERE id=?", (int(pid),)).fetchone()
+        dom = (row[0] if row else "").strip()
+        return dom or None
+    except Exception:
+        return None
+
 # ======== 轻量日志机制 ========
 LOG_DIR = os.path.join(BASE_DIR, "logs")
 os.makedirs(LOG_DIR, exist_ok=True)
@@ -1818,7 +1830,10 @@ for t, cols in {
     "term_ext": [("domain","TEXT"),("project_id","INTEGER"),("strategy","TEXT"),
                  ("example","TEXT"),("note","TEXT"), ("category","TEXT")],
     "trans_ext": [("stats_json","TEXT"),("segments","INTEGER"),("term_hit_total","INTEGER")],
-    "corpus": [("title","TEXT"),("project_id","INTEGER"),("lang_pair","TEXT"),("src_text","TEXT"),("tgt_text","TEXT"),("note","TEXT"),("created_at","TEXT")],
+    "corpus": [
+        ("title","TEXT"),("project_id","INTEGER"),("lang_pair","TEXT"),("src_text","TEXT"),("tgt_text","TEXT"),
+        ("note","TEXT"),("created_at","TEXT"),("domain","TEXT"),("source","TEXT"),
+    ],
 }.items():
     for c, tp in cols:
         ensure_col(t, c, tp)
@@ -2310,12 +2325,41 @@ def _split_sentences_for_terms(text: str) -> list[str]:
     return [p.strip() for p in parts if p.strip()]
 
 
+def _locate_example_pair(example: str | None, src_full: str | None, tgt_full: str | None):
+    """
+    在翻译历史中为示例句找到可能的对齐译文。
+    返回 (src_example, tgt_example or None)。
+    """
+    if not example:
+        return None, None
+
+    ex = example.strip()
+    if not ex:
+        return None, None
+
+    src_sents = split_sents(src_full or "", prefer_newline=True, min_char=2)
+    tgt_sents = split_sents(tgt_full or "", prefer_newline=True, min_char=1)
+
+    match_idx = None
+    for i, s in enumerate(src_sents):
+        if ex in s:
+            match_idx = i
+            break
+
+    if match_idx is None:
+        return ex, None
+
+    tgt = tgt_sents[match_idx] if match_idx < len(tgt_sents) else None
+    return ex, tgt or None
+
+
 def extract_terms_with_corpus_model(
     text: str,
     *,
     max_terms: int = 30,
     src_lang: str = "zh",
     tgt_lang: str = "en",
+    default_domain: str | None = None,
 ):
     """
     使用与语料库向量检索同一套模型(distiluse-base-multilingual-cased-v1)做术语提取。
@@ -2362,13 +2406,15 @@ def extract_terms_with_corpus_model(
         return None
 
     out = []
+    domain_val = (default_domain or "").strip() or "其他"
+
     for term, sc in ranked:
         out.append(
             {
                 "source_term": term,
                 # 现阶段缺少统一的自动译法，保持字段齐全以便后续人工/模型补全
                 "target_term": None,
-                "domain": "其他",
+                "domain": domain_val,
                 "strategy": None,
                 "example": _example_for(term),
                 "score": float(sc),
@@ -2388,6 +2434,7 @@ def ds_extract_terms(
     tgt_lang: str = "en",
     *,
     prefer_corpus_model: bool = True,
+    default_domain: str | None = None,
 ):
     """术语提取：优先走语料库同款向量模型，失败时再回退 DeepSeek Prompt。"""
 
@@ -2397,7 +2444,13 @@ def ds_extract_terms(
 
     if prefer_corpus_model:
         try:
-            return extract_terms_with_corpus_model(txt, max_terms=30, src_lang=src_lang, tgt_lang=tgt_lang)
+            return extract_terms_with_corpus_model(
+                txt,
+                max_terms=30,
+                src_lang=src_lang,
+                tgt_lang=tgt_lang,
+                default_domain=default_domain,
+            )
         except Exception as e:
             log_event("ERROR", "corpus-model term extraction failed", error=str(e))
 
@@ -2455,7 +2508,7 @@ Text:
         for o in arr:
             src = (o.get("source_term") or o.get("source") or "").strip()
             tgt = (o.get("target_term") or o.get("target") or "").strip()
-            dom = (o.get("domain") or "").strip() or None
+            dom = (o.get("domain") or "").strip() or (default_domain or None)
             strat = (o.get("strategy") or "").strip() or None
             ex = (o.get("example") or "").strip() or None
             if src:
@@ -4338,6 +4391,7 @@ elif choice.startswith("📊"):
             # 项目标题(做语料标题/展示)
             ttl_row = cur.execute("SELECT IFNULL(title,'') FROM items WHERE id=?", (pid,)).fetchone()
             proj_title = (ttl_row or [""])[0] or f"project#{pid}"
+            proj_domain = _project_domain(pid)
 
             with st.expander(f"#{rid}｜项目 {pid}｜{proj_title}｜{lp}｜{ts}", expanded=False):
                 # 译文全文 & 源文件路径
@@ -4417,26 +4471,56 @@ elif choice.startswith("📊"):
 
                         # 合并原文+译文.提高候选质量
                         big = ((src_full or "") + "\n" + (tgt_full or "")).strip()
-                        res = ds_extract_terms(big, ak, model, src_lang="zh", tgt_lang="en", prefer_corpus_model=True)
+                        res = ds_extract_terms(
+                            big,
+                            ak,
+                            model,
+                            src_lang="zh",
+                            tgt_lang="en",
+                            prefer_corpus_model=True,
+                            default_domain=proj_domain,
+                        )
                         if not res:
                             st.info("未抽取到术语或解析失败")
                         else:
-                            ins = 0
+                            ins_term = ins_corpus = 0
                             for o in res:
+                                domain_val = (o.get("domain") or proj_domain or "其他")
+                                strategy_val = (o.get("strategy") or "history-extract")
                                 cur.execute("""
                                     INSERT INTO term_ext (source_term, target_term, domain, project_id, strategy, example)
                                     VALUES (?, ?, ?, ?, ?, ?)
                                 """, (
                                     o.get("source_term") or "",
                                     (o.get("target_term") or None),
-                                    (o.get("domain") or None),
+                                    domain_val,
                                     pid,
-                                    (o.get("strategy") or "history-extract"),
+                                    strategy_val,
                                     (o.get("example") or None),
                                 ))
-                                ins += 1
+                                ins_term += 1
+
+                                src_ex, tgt_ex = _locate_example_pair(o.get("example"), src_full, tgt_full)
+                                if src_ex:
+                                    cur.execute(
+                                        """
+                                        INSERT INTO corpus(title, project_id, lang_pair, src_text, tgt_text, note, domain, source, created_at)
+                                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+                                        """,
+                                        (
+                                            f"{proj_title} · term#{rid}",
+                                            pid,
+                                            lp or "",
+                                            src_ex,
+                                            tgt_ex,
+                                            "term-example",
+                                            domain_val,
+                                            "history-term",
+                                        ),
+                                    )
+                                    ins_corpus += 1
                             conn.commit()
-                            st.success(f"✅ 已写入术语库 {ins} 条")
+                            st.success(f"✅ 已写入术语库 {ins_term} 条，同步语料库 {ins_corpus} 条")
 
                 # 3) 下载双语对照(CSV / DOCX)
                 with c3:
