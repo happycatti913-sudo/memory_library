@@ -2299,15 +2299,112 @@ def translate_block_with_kb(
         "violated_terms": violated,
     }
 
-def ds_extract_terms(text: str, ak: str, model: str, src_lang: str = "zh", tgt_lang: str = "en"):
-    """
-    用 DeepSeek 从文本中抽取术语对.返回 JSON 数组:
-    [{"source_term":"...", "target_term":"...", "domain":"...", "strategy":"...", "example":"..."}]
-    """
-    import requests
-
-    if not text.strip():
+def _split_sentences_for_terms(text: str) -> list[str]:
+    """用于术语示例抽取的轻量分句，兼容中英文标点。"""
+    if not text:
         return []
+    txt = _norm_text(text)
+    if not txt:
+        return []
+    parts = re.split(r"(?<=[。！？；.!?])\s+|\n+", txt)
+    return [p.strip() for p in parts if p.strip()]
+
+
+def extract_terms_with_corpus_model(
+    text: str,
+    *,
+    max_terms: int = 30,
+    src_lang: str = "zh",
+    tgt_lang: str = "en",
+):
+    """
+    使用与语料库向量检索同一套模型(distiluse-base-multilingual-cased-v1)做术语提取。
+
+    逻辑:
+    1) 借助正则从文本中抓取中英术语候选(2-8 字中文、1-3 词英文短语)。
+    2) 用 get_embedder() 返回的句向量模型对全文和候选做向量化，按相似度选出代表性术语。
+    3) 结构化返回字段与原 DeepSeek 提示保持一致(source/target/domain/strategy/example)。
+    """
+
+    txt = (text or "").strip()
+    if not txt:
+        return []
+
+    backend, encode = get_embedder()
+
+    def _dedup_keep(seq):
+        seen = set()
+        out = []
+        for x in seq:
+            if x in seen:
+                continue
+            seen.add(x)
+            out.append(x)
+        return out
+
+    zh_candidates = re.findall(r"[\u4e00-\u9fa5]{2,8}", txt)
+    en_candidates = re.findall(r"[A-Za-z][A-Za-z\-]{2,}(?: [A-Za-z\-]{2,}){0,2}", txt)
+    candidates = _dedup_keep(zh_candidates + en_candidates)
+    if not candidates:
+        return []
+
+    doc_emb = encode([txt])[0]
+    cand_emb = encode(candidates)
+    scores = cand_emb @ doc_emb
+
+    ranked = sorted(zip(candidates, scores.tolist()), key=lambda x: x[1], reverse=True)[:max_terms]
+    sents = _split_sentences_for_terms(txt)
+
+    def _example_for(term: str):
+        for s in sents:
+            if term in s:
+                return s
+        return None
+
+    out = []
+    for term, sc in ranked:
+        out.append(
+            {
+                "source_term": term,
+                # 现阶段缺少统一的自动译法，保持字段齐全以便后续人工/模型补全
+                "target_term": None,
+                "domain": "其他",
+                "strategy": None,
+                "example": _example_for(term),
+                "score": float(sc),
+                "model": backend,
+                "src_lang": src_lang,
+                "tgt_lang": tgt_lang,
+            }
+        )
+    return out
+
+
+def ds_extract_terms(
+    text: str,
+    ak: str,
+    model: str,
+    src_lang: str = "zh",
+    tgt_lang: str = "en",
+    *,
+    prefer_corpus_model: bool = True,
+):
+    """术语提取：优先走语料库同款向量模型，失败时再回退 DeepSeek Prompt。"""
+
+    txt = (text or "").strip()
+    if not txt:
+        return []
+
+    if prefer_corpus_model:
+        try:
+            return extract_terms_with_corpus_model(txt, max_terms=30, src_lang=src_lang, tgt_lang=tgt_lang)
+        except Exception as e:
+            log_event("ERROR", "corpus-model term extraction failed", error=str(e))
+
+    if not ak:
+        return []
+
+    import requests
 
     system_msg = (
         "You are a terminology mining assistant. Extract high-value bilingual term pairs suitable for a project glossary. "
@@ -3440,60 +3537,90 @@ def render_term_management(st, cur, conn, base_dir, key_prefix="term"):
         st.markdown("#### 从翻译历史记录抽取术语(DeepSeek)")
         ak, model = get_deepseek()
         if not ak:
-            st.warning("未检测到 DeepSeek Key.请先在“设置”中配置。")
+            st.info("未检测到 DeepSeek Key，将直接使用语料库同款模型做结构化术语抽取。")
+
+        mode_pick = st.radio(
+            "选择来源",
+            ["按项目抽取(合并多条)", "按单条记录抽取"],
+            horizontal=True,
+            key=sk5("ext_mode"),
+        )
+        if mode_pick == "按项目抽取(合并多条)":
+            pid_ext = st.text_input("项目ID", key=sk5("ext_pid"))
+            max_chars = st.number_input("采样最大字符数", 1000, 20000, 5000, 500, key=sk5("ext_max"))
+            if st.button("开始抽取", key=sk5("ext_go_proj")):
+                if pid_ext.isdigit():
+                    rows = cur.execute(
+                        "SELECT src_path, output_text FROM trans_ext WHERE project_id=? ORDER BY id DESC LIMIT 10",
+                        (int(pid_ext),),
+                    ).fetchall()
+                    buf = []
+                    total = 0
+                    for sp, ot in rows:
+                        src = read_source_file(sp) if sp else ""
+                        txt = (src + "\n" + (ot or "")).strip()
+                        if not txt:
+                            continue
+                        if total + len(txt) > int(max_chars):
+                            remain = max(0, int(max_chars) - total)
+                            buf.append(txt[:remain])
+                            break
+                        else:
+                            buf.append(txt)
+                            total += len(txt)
+                    big = "\n\n".join(buf)
+                    big = "\n\n".join(buf)
+
+                    # ✅ 先看这个项目到底有没有可用的历史文本
+                    if not big.strip():
+                        st.warning("该项目下没有可用的翻译历史文本，无法抽取术语。")
+                        return
+
+                    # 调试用:你可以先看看采样了多少字、前几行是什么
+                    st.write({
+                        "history_rows": len(rows),
+                        "sample_chars": len(big),
+                        "sample_preview": big[:300]
+                    })
+
+                    try:
+                        res = ds_extract_terms(big, ak, model, src_lang="zh", tgt_lang="en", prefer_corpus_model=True)
+                    except Exception as e:
+                        st.error(f"调用术语抽取时出错: {e}")
+                        return
+
+                    # 调试用:先看一下原始结果长什么样
+                    st.write({"extract_result_preview": str(res)[:500]})
+                    if not res:
+                        st.info("未抽取到术语或解析失败")
+                    else:
+                        st.success(f"抽取到 {len(res)} 条.准备批量写入……")
+                        ins = 0
+                        for o in res:
+                            cur.execute(
+                                "INSERT INTO term_ext (source_term, target_term, domain, project_id, strategy, example) VALUES (?, ?, ?, ?, ?, ?)",
+                                (o["source_term"], o.get("target_term") or None, o.get("domain"), int(pid_ext), o.get("strategy"), o.get("example")),
+                            )
+                            ins += 1
+                        conn.commit()
+                        st.success(f"✅ 已写入术语库 {ins} 条")
+                else:
+                    st.warning("请输入数字型项目ID")
         else:
-            mode_pick = st.radio(
-                "选择来源",
-                ["按项目抽取(合并多条)", "按单条记录抽取"],
-                horizontal=True,
-                key=sk5("ext_mode"),
-            )
-            if mode_pick == "按项目抽取(合并多条)":
-                pid_ext = st.text_input("项目ID", key=sk5("ext_pid"))
-                max_chars = st.number_input("采样最大字符数", 1000, 20000, 5000, 500, key=sk5("ext_max"))
-                if st.button("开始抽取", key=sk5("ext_go_proj")):
-                    if pid_ext.isdigit():
-                        rows = cur.execute(
-                            "SELECT src_path, output_text FROM trans_ext WHERE project_id=? ORDER BY id DESC LIMIT 10",
-                            (int(pid_ext),),
-                        ).fetchall()
-                        buf = []
-                        total = 0
-                        for sp, ot in rows:
-                            src = read_source_file(sp) if sp else ""
-                            txt = (src + "\n" + (ot or "")).strip()
-                            if not txt:
-                                continue
-                            if total + len(txt) > int(max_chars):
-                                remain = max(0, int(max_chars) - total)
-                                buf.append(txt[:remain])
-                                break
-                            else:
-                                buf.append(txt)
-                                total += len(txt)
-                        big = "\n\n".join(buf)
-                        big = "\n\n".join(buf)
-
-                        # ✅ 先看这个项目到底有没有可用的历史文本
-                        if not big.strip():
-                            st.warning("该项目下没有可用的翻译历史文本，无法抽取术语。")
-                            return
-
-                        # 调试用:你可以先看看采样了多少字、前几行是什么
-                        st.write({
-                            "history_rows": len(rows),
-                            "sample_chars": len(big),
-                            "sample_preview": big[:300]
-                        })
-
-                        try:
-                            res = ds_extract_terms(big, ak, model, src_lang="zh", tgt_lang="en")
-                        except Exception as e:
-                            st.error(f"调用 DeepSeek 抽取术语时出错: {e}")
-                            return
-
-                        # 调试用:先看一下原始结果长什么样
-                        st.write({"extract_result_preview": str(res)[:500]})
+            rid_ext = st.text_input("历史记录ID", key=sk5("ext_rid"))
+            if st.button("开始抽取", key=sk5("ext_go_rec")):
+                if rid_ext.isdigit():
+                    row = cur.execute(
+                        "SELECT src_path, output_text, project_id FROM trans_ext WHERE id=?",
+                        (int(rid_ext),),
+                    ).fetchone()
+                    if not row:
+                        st.warning("未找到该记录")
+                    else:
+                        sp, ot, pid0 = row
+                        src = read_source_file(sp) if sp else ""
+                        big = (src + "\n" + (ot or "")).strip()
+                        res = ds_extract_terms(big, ak, model, src_lang="zh", tgt_lang="en", prefer_corpus_model=True)
                         if not res:
                             st.info("未抽取到术语或解析失败")
                         else:
@@ -3502,41 +3629,11 @@ def render_term_management(st, cur, conn, base_dir, key_prefix="term"):
                             for o in res:
                                 cur.execute(
                                     "INSERT INTO term_ext (source_term, target_term, domain, project_id, strategy, example) VALUES (?, ?, ?, ?, ?, ?)",
-                                    (o["source_term"], o.get("target_term") or None, o.get("domain"), int(pid_ext), o.get("strategy"), o.get("example")),
+                                    (o["source_term"], o.get("target_term") or None, o.get("domain"), pid0, o.get("strategy"), o.get("example")),
                                 )
                                 ins += 1
                             conn.commit()
-                            st.success(f"✅ 已写入术语库 {ins} 条")
-                    else:
-                        st.warning("请输入数字型项目ID")
-            else:
-                rid_ext = st.text_input("历史记录ID", key=sk5("ext_rid"))
-                if st.button("开始抽取", key=sk5("ext_go_rec")):
-                    if rid_ext.isdigit():
-                        row = cur.execute(
-                            "SELECT src_path, output_text, project_id FROM trans_ext WHERE id=?",
-                            (int(rid_ext),),
-                        ).fetchone()
-                        if not row:
-                            st.warning("未找到该记录")
-                        else:
-                            sp, ot, pid0 = row
-                            src = read_source_file(sp) if sp else ""
-                            big = (src + "\n" + (ot or "")).strip()
-                            res = ds_extract_terms(big, ak, model, src_lang="zh", tgt_lang="en")
-                            if not res:
-                                st.info("未抽取到术语或解析失败")
-                            else:
-                                st.success(f"抽取到 {len(res)} 条.准备批量写入……")
-                                ins = 0
-                                for o in res:
-                                    cur.execute(
-                                        "INSERT INTO term_ext (source_term, target_term, domain, project_id, strategy, example) VALUES (?, ?, ?, ?, ?, ?)",
-                                        (o["source_term"], o.get("target_term") or None, o.get("domain"), pid0, o.get("strategy"), o.get("example")),
-                                    )
-                                    ins += 1
-                                conn.commit()
-                                st.success(f"✅ 已写入术语库 {ins} 条(project_id={pid0})")
+                            st.success(f"✅ 已写入术语库 {ins} 条(project_id={pid0})")
 
     # —— 分类管理
     with sub_tabs[6]:
@@ -4311,35 +4408,35 @@ elif choice.startswith("📊"):
                                     f"已写入语料库，但重建索引失败: {res_idx.get('msg','未知错误')}"
                                 )
 
-                # 2) 提取术语(走你现有的 DeepSeek 抽取函数)
+                # 2) 提取术语(优先语料库同款模型，缺省回退 DeepSeek)
                 with c2:
                     if st.button("🧠 提取术语", key=f"hist_extract_terms_{rid}"):
                         ak, model = get_deepseek()
                         if not ak:
-                            st.warning("未检测到 DeepSeek Key(请到“设置”页配置)")
+                            st.info("未检测到 DeepSeek Key，将仅使用语料库同款模型进行抽取。")
+
+                        # 合并原文+译文.提高候选质量
+                        big = ((src_full or "") + "\n" + (tgt_full or "")).strip()
+                        res = ds_extract_terms(big, ak, model, src_lang="zh", tgt_lang="en", prefer_corpus_model=True)
+                        if not res:
+                            st.info("未抽取到术语或解析失败")
                         else:
-                            # 合并原文+译文.提高候选质量
-                            big = ((src_full or "") + "\n" + (tgt_full or "")).strip()
-                            res = ds_extract_terms(big, ak, model, src_lang="zh", tgt_lang="en")
-                            if not res:
-                                st.info("未抽取到术语或解析失败")
-                            else:
-                                ins = 0
-                                for o in res:
-                                    cur.execute("""
-                                        INSERT INTO term_ext (source_term, target_term, domain, project_id, strategy, example)
-                                        VALUES (?, ?, ?, ?, ?, ?)
-                                    """, (
-                                        o.get("source_term") or "",
-                                        (o.get("target_term") or None),
-                                        (o.get("domain") or None),
-                                        pid,
-                                        (o.get("strategy") or "history-extract"),
-                                        (o.get("example") or None),
-                                    ))
-                                    ins += 1
-                                conn.commit()
-                                st.success(f"✅ 已写入术语库 {ins} 条")
+                            ins = 0
+                            for o in res:
+                                cur.execute("""
+                                    INSERT INTO term_ext (source_term, target_term, domain, project_id, strategy, example)
+                                    VALUES (?, ?, ?, ?, ?, ?)
+                                """, (
+                                    o.get("source_term") or "",
+                                    (o.get("target_term") or None),
+                                    (o.get("domain") or None),
+                                    pid,
+                                    (o.get("strategy") or "history-extract"),
+                                    (o.get("example") or None),
+                                ))
+                                ins += 1
+                            conn.commit()
+                            st.success(f"✅ 已写入术语库 {ins} 条")
 
                 # 3) 下载双语对照(CSV / DOCX)
                 with c3:
