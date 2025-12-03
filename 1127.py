@@ -36,24 +36,6 @@ os.makedirs(PROJECT_DIR, exist_ok=True)
 SEM_INDEX_ROOT = os.path.join(BASE_DIR, "semantic_index")
 os.makedirs(SEM_INDEX_ROOT, exist_ok=True)
 
-# ---------- 语义索引文件路径 ----------
-# ---------- 领域归一化 & 索引路径 ----------
-def _norm_domain_key(raw: str | None) -> str:
-    """
-    把数据库里的 domain 字段转成适合作为文件夹名的 key：
-    - None/空 → "未分类"
-    - 去掉首尾空格
-    - 替换掉不适合作为路径的字符
-    """
-    s = (raw or "").strip()
-    if not s:
-        s = "未分类"
-    # Windows 不允许的字符简单替换掉
-    for ch in r'\\/:"*?<>|':
-        s = s.replace(ch, "_")
-    return s
-
-
 def _norm_domain_key(raw: str | None) -> str:
     """
     把数据库里的 domain 字段转成适合作为文件夹名的 key：
@@ -1128,18 +1110,6 @@ def _save_index(project_id: int, mode: str, index, mapping, vecs=None):
     with open(map_path, "w", encoding="utf-8") as f:
         json.dump(mapping, f, ensure_ascii=False, indent=2)
 
-def _norm_domain_key(raw: str | None) -> str:
-    """将数据库中的 domain 统一为适合作为文件夹名的 key:
-    - None/空 → "未分类"
-    - 去掉首尾空格
-    - 替换掉路径中不允许的字符
-    """
-    s = (raw or "").strip()
-    if not s:
-        s = "未分类"
-    for ch in r'\\/:"*?<>|':
-        s = s.replace(ch, "_")
-    return s
 def _index_paths_domain(domain: str, kb_type: str):
     """按“领域 + 类型”返回对应索引文件路径"""
     domain_key = _norm_domain_key(domain)
@@ -1755,10 +1725,15 @@ def _has_col(table: str, col: str) -> bool:
     return any(r[1] == col for r in cur.fetchall())
 
 def ensure_col(table: str, col: str, col_type: str):
+    """
+    确保指定表存在某列；如不存在则添加并立即提交。
+    依赖全局的 conn/cur，调用方无需单独 commit。
+    """
     cur.execute(f"PRAGMA table_info({table})")
     cols = {r[1] for r in cur.fetchall()}
     if col not in cols:
         cur.execute(f"ALTER TABLE {table} ADD COLUMN {col} {col_type}")
+        conn.commit()
 
 # —— 建表
 cur.execute("""
@@ -1986,8 +1961,12 @@ def build_term_hint(term_dict: dict, lang_pair: str, max_terms: int = 80) -> str
       { "contract": "合同" }
       { "contract": {"target":"合同", "pos":"NOUN", "usage_note":"法律语境"} }
       { "contract": ("合同", "NOUN") }   # 元组形式 (target, pos)
-    空目标会被忽略;自动去重并最多输出 max_terms 条.避免提示过长。
+    空/非 dict 的输入会被安全忽略; 空目标会被忽略; 自动去重并最多输出
+    max_terms 条，避免提示过长。
     """
+    if not term_dict or not isinstance(term_dict, dict):
+        return ""
+
     lines = []
     seen = set()
     items = list(term_dict.items())[: max_terms * 2]  # 稍多取一些.过滤空后再截断
@@ -2033,21 +2012,47 @@ def build_term_hint(term_dict: dict, lang_pair: str, max_terms: int = 80) -> str
 def build_instruction(lang_pair: str) -> str:
     """
     生成简洁的翻译指令。你也可以按项目风格再扩展。
+
+    - 支持中文与英文写法（如 "Chinese to English"/"English→Chinese"）。
+    - 统一把各种箭头/连字符/"to" 转成 "-"，便于模式匹配。
     """
-    lp = (lang_pair or "").replace(" ", "")
-    if "中→英" in lp or "中->英" in lp or "zh" in lp.lower() and "en" in lp.lower():
+    lp_raw = (lang_pair or "").replace(" ", "")
+    lp_norm = lp_raw.lower()
+    for sep in ("→", "->", "=>", "—>", "—", "—", "—-", "——"):
+        lp_norm = lp_norm.replace(sep, "-")
+    lp_norm = (
+        lp_norm.replace("to", "-")
+        .replace("_", "-")
+        .replace("/", "-")
+    )
+
+    zh_to_en_tokens = (
+        "中译英", "中→英", "中->英", "中-英", "zh-en", "zh2en", "zh_en", "zh-en",
+        "chinese-english", "chinese-en", "zh-english",
+    )
+    en_to_zh_tokens = (
+        "英译中", "英→中", "英->中", "英-中", "en-zh", "en2zh", "en_zh", "en-zh",
+        "english-chinese", "english-zh", "en-chinese",
+    )
+
+    def _match(tokens: tuple[str, ...]) -> bool:
+        return any(tok in lp_raw or tok in lp_norm for tok in tokens)
+
+    if _match(zh_to_en_tokens):
         return (
             "Translate the source text from Chinese to English. "
             "Use a professional, natural style; follow the GLOSSARY (STRICT) exactly; "
             "preserve proper nouns and numbers; keep paragraph structure. "
             "Do not add explanations."
         )
-    if "英→中" in lp or "英->中" in lp or "en" in lp.lower() and "zh" in lp.lower():
+
+    if _match(en_to_zh_tokens):
         return (
             "Translate the source text from English to Chinese. "
             "用专业、通顺、符合领域文体的中文表达;严格遵守上方 GLOSSARY (STRICT);"
             "专有名词、数字与计量单位保持准确;段落结构保持一致。不得添加解释。"
         )
+
     # 兜底
     return (
         "Translate the source text. Follow the GLOSSARY (STRICT) exactly. "
@@ -2063,7 +2068,7 @@ def ds_translate(
     ref_context: str = "",
     fewshot_examples=None,
 ) -> str:
-    term_hint = build_term_hint(term_dict, lang_pair)  # 你现有的术语提示
+    term_hint = build_term_hint(term_dict, lang_pair)  # 统一使用严格术语提示
     instr = build_instruction(lang_pair)   # type: ignore
 
     """
@@ -2074,22 +2079,23 @@ def ds_translate(
     if not block.strip():
         return ""
 
-    if term_dict:
-        term_lines = "\n".join([f"- {k} -> {v}" for k, v in term_dict.items()])
-        term_hint = (
-            "TERMINOLOGY:\n"
-            "Use the following mappings EXACTLY and consistently. Do not invent alternatives.\n"
-            f"{term_lines}\n"
-        )
-    else:
-        term_hint = "TERMINOLOGY:\nEnsure consistent terminology; avoid paraphrasing fixed terms.\n"
+    # 如果术语为空，为了让提示始终包含 GLOSSARY 段落，给出一个安全的兜底
+    if not term_hint:
+        if term_dict:
+            # 术语字典存在但内容被过滤为空，给出简洁的默认提示
+            term_hint = (
+                "GLOSSARY (STRICT):\n"
+                "- Follow provided terminology exactly; do not paraphrase fixed terms.\n\n"
+            )
+        else:
+            term_hint = (
+                "GLOSSARY (STRICT):\n"
+                "- Ensure consistent terminology; avoid paraphrasing fixed terms.\n\n"
+            )
 
-    if lang_pair == "中译英":
-        instr = "Translate the Chinese text into English with high fidelity and formal style."
-    elif lang_pair == "英译中":
-        instr = "将下列英文准确译为中文.语体正式、专业。"
-    else:
-        instr = "Translate accurately into the other language."
+    # 保证与后续 INSTRUCTION 块之间有空行
+    if not term_hint.endswith("\n\n"):
+        term_hint = term_hint.rstrip("\n") + "\n\n"
 
     system_msg = (
         "You are a senior professional translator. Prioritize accuracy, faithfulness, and consistent terminology. "
