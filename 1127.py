@@ -3213,7 +3213,9 @@ def render_term_management(st, cur, conn, base_dir, key_prefix="term"):
                         st.rerun()
 
                 with c3:
-                    proj_opts = cur.execute("SELECT id, title FROM items ORDER BY id DESC").fetchall()
+                    proj_opts = cur.execute(
+                        "SELECT id, title FROM items WHERE COALESCE(type,'')='project' ORDER BY id DESC"
+                    ).fetchall()
                     proj_map = {"(不挂接/置空)": None, **{f"#{i} {t}": i for (i, t) in proj_opts}}
 
                     cc3a, cc3b = st.columns([2, 1])
@@ -4038,22 +4040,25 @@ if choice.startswith("📂"):
                 except Exception as e:
                     st.error(f"❌ 创建项目失败: {e}")
 
-    rows = cur.execute("""
+    rows = cur.execute(
+        """
         SELECT
             i.id,
             i.title,
-            COALESCE(i.tags,'')         AS tags,
-            COALESCE(e.src_path,'')     AS src_path,
-            COALESCE(i.created_at,'')   AS created_at,
-            COALESCE(i.scene,'')        AS scene,
-            COALESCE(i.prompt,'')       AS prompt,
-            COALESCE(i.mode,'')         AS mode,
-            COALESCE(i.trans_type,'')   AS trans_type
+            COALESCE(i.tags,'')              AS tags,
+            COALESCE(MIN(e.src_path),'')     AS src_path,
+            COALESCE(i.created_at,'')        AS created_at,
+            COALESCE(i.scene,'')             AS scene,
+            COALESCE(i.prompt,'')            AS prompt,
+            COALESCE(i.mode,'')              AS mode,
+            COALESCE(i.trans_type,'')        AS trans_type
         FROM items i
         LEFT JOIN item_ext e ON e.item_id = i.id
         WHERE COALESCE(i.type,'')='project'
+        GROUP BY i.id
         ORDER BY i.id DESC
-    """).fetchall()
+        """
+    ).fetchall()
 
     if not rows:
         st.info("暂无项目")
@@ -4972,7 +4977,15 @@ elif choice.startswith("📚"):
         st.subheader("🧠 语义索引管理 & 召回测试")
 
         # 选择项目
-        proj_rows = cur.execute("SELECT id, title FROM items ORDER BY id DESC LIMIT 200").fetchall()
+        proj_rows = cur.execute(
+            """
+            SELECT id, title
+            FROM items
+            WHERE COALESCE(type,'')='project'
+            ORDER BY id DESC
+            LIMIT 200
+            """
+        ).fetchall()
         proj_map = {"(请选择)": None}
         proj_map.update({f"[{i}] {t}": i for (i, t) in proj_rows})
         proj_sel = st.selectbox("选择要测试/重建索引的项目", list(proj_map.keys()), key=sk("vec_proj"))
