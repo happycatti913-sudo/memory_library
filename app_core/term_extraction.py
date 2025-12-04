@@ -1,9 +1,7 @@
 # -*- coding: utf-8 -*-
-"""术语提取与示例对齐工具。"""
-
+"""术语提取与示例对齐工具（本地向量版，仅用语料向量，不调用外部API）。"""
 from __future__ import annotations
 
-import json
 import re
 from typing import Iterable
 
@@ -12,7 +10,7 @@ from app_core.text_utils import _norm_text, split_sents
 
 
 def _split_sentences_for_terms(text: str) -> list[str]:
-    """用于术语示例抽取的轻量分句，兼容中英文标点。"""
+    """轻量分句，兼容中英文标点。"""
     if not text:
         return []
     txt = _norm_text(text)
@@ -23,10 +21,9 @@ def _split_sentences_for_terms(text: str) -> list[str]:
 
 
 def _locate_example_pair(example: str | None, src_full: str | None, tgt_full: str | None):
-    """在翻译历史中为示例句找到可能的对齐译文。"""
+    """在双语文本中为例句找到对应译文。"""
     if not example:
         return None, None
-
     ex = example.strip()
     if not ex:
         return None, None
@@ -42,7 +39,6 @@ def _locate_example_pair(example: str | None, src_full: str | None, tgt_full: st
 
     if match_idx is None:
         return ex, None
-
     tgt = tgt_sents[match_idx] if match_idx < len(tgt_sents) else None
     return ex, tgt or None
 
@@ -94,10 +90,16 @@ def extract_terms_with_corpus_model(
     out = []
     for term, _ in ranked:
         ex = _example_for(term)
+        tgt_term = term
+        if tgt_lang.startswith("zh"):
+            tgt_term = term
+        elif tgt_lang.startswith("en"):
+            tgt_term = term
+
         out.append(
             {
                 "source_term": term if src_lang.startswith("zh") else None,
-                "target_term": term if src_lang.startswith("en") else None,
+                "target_term": tgt_term,
                 "domain": default_domain or None,
                 "strategy": None,
                 "example": ex,
@@ -115,74 +117,14 @@ def ds_extract_terms(
     src_lang: str = "zh",
     tgt_lang: str = "en",
     default_domain: str | None = None,
+    prefer_corpus_model: bool | None = None,
+    **kwargs,
 ):
-    """调用 DeepSeek 生成式接口抽取结构化术语。"""
-    import requests
-
-    if not text or not text.strip():
-        return []
-
-    system_msg = (
-        "You are a bilingual terminology mining assistant."
-        "Only return structured terminology entries in JSON."
+    """仅使用本地语料向量模型抽取术语（DeepSeek 禁用）。"""
+    return extract_terms_with_corpus_model(
+        text or "",
+        max_terms=30,
+        src_lang=src_lang,
+        tgt_lang=tgt_lang,
+        default_domain=default_domain,
     )
-    user_msg = f"""
-Source language: {src_lang}
-Target language: {tgt_lang}
-任务:从给定文本中抽取双语术语条目.输出 JSON 数组。字段名与取值必须是中文。
-字段定义:
-- source_term: 源语(中文术语或专名)
-- target_term: 译文(英文)
-- domain: 领域.取值集合之一:["政治","经济","文化","文物","金融","法律","其他"]
-- strategy: 翻译策略.取值集合之一:["直译","意译","转译","音译","省略","增译","规范化","其他"]
-- example: 例句(原文中包含该术语的一句.尽量保留标点)
-
-要求:
-1) 仅输出 JSON.不要多余说明。
-2) 同一术语重复时合并.选择最典型的例句。
-3) 若无法判断 domain/strategy.填“其他”。
-
-Text:
-{text}
-"""
-
-    url = "https://api.deepseek.com/v1/chat/completions"
-    headers = {"Authorization": f"Bearer {ak}", "Content-Type": "application/json"}
-    payload = {
-        "model": model or "deepseek-chat",
-        "messages": [
-            {"role": "system", "content": system_msg},
-            {"role": "user", "content": user_msg},
-        ],
-        "temperature": 0.1,
-    }
-    try:
-        r = requests.post(url, headers=headers, json=payload, timeout=60)
-        r.raise_for_status()
-        data = r.json()
-        txt = data["choices"][0]["message"]["content"].strip()
-        start = txt.find("[")
-        end = txt.rfind("]")
-        if start == -1 or end == -1:
-            return []
-        arr = json.loads(txt[start : end + 1])
-        out = []
-        for o in arr:
-            src = (o.get("source_term") or o.get("source") or "").strip()
-            tgt = (o.get("target_term") or o.get("target") or "").strip()
-            dom = (o.get("domain") or "").strip() or (default_domain or None)
-            strat = (o.get("strategy") or "").strip() or None
-            ex = (o.get("example") or "").strip() or None
-            if src:
-                out.append(
-                    {
-                        "source_term": src,
-                        "target_term": tgt,
-                        "domain": dom,
-                        "strategy": strat,
-                        "example": ex,
-                    }
-                )
-        return out
-    except Exception:
-        return []

@@ -263,10 +263,11 @@ def build_project_vector_index(
                IFNULL(c.title, ''),    IFNULL(c.lang_pair, ''),
                IFNULL(c.project_id, 0), IFNULL(c.domain, '')
         FROM corpus c
-        WHERE IFNULL(c.domain, '') = ?
+        WHERE (IFNULL(c.project_id, 0) = ?)
+           OR (IFNULL(c.domain, '') = ?)
         ORDER BY c.id ASC
         """,
-        (proj_domain,),
+        (pid, proj_domain),
     ).fetchall()
 
     texts, metas = [], []

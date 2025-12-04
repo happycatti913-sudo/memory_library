@@ -338,11 +338,20 @@ def render_project_tab(st, cur, conn, base_dir, use_semantic=True):
             ) if file_records else None
 
             # 兼容旧数据：若 item_ext 为空但 items.body 有文件内容，则补录
-            ensure_legacy_file_record(cur, conn, pid, file_records)
+            ensure_legacy_file_record(cur, conn, pid, src_path)
 
             up_files = st.file_uploader("上传新文件", accept_multiple_files=True, key=f"upload_{pid}")
             if up_files:
-                file_records, saved_paths = register_project_file(cur, conn, pid, up_files, base_dir)
+                saved_names_key = f"uploaded_saved_{pid}"
+                saved_names = st.session_state.get(saved_names_key, set())
+                new_files = [uf for uf in up_files if uf.name not in saved_names]
+
+                file_records, saved_paths = ([], [])
+                if new_files:
+                    file_records, saved_paths = register_project_file(cur, conn, pid, new_files, base_dir)
+                    saved_names.update([uf.name for uf in new_files])
+                    st.session_state[saved_names_key] = saved_names
+
                 saved = len(saved_paths)
 
                 if file_records:

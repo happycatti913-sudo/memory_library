@@ -65,8 +65,8 @@ def render_history_tab(st, cur, conn):
                     else:
                         cur.execute(
                             """
-                                INSERT INTO corpus (title, project_id, lang_pair, src_text, tgt_text, note, created_at)
-                                VALUES (?, ?, ?, ?, ?, ?, datetime('now'))
+                                INSERT INTO corpus (title, project_id, lang_pair, src_text, tgt_text, note, domain, created_at)
+                                VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'))
                             """,
                             (
                                 f"{proj_title} · history#{rid}",
@@ -75,6 +75,7 @@ def render_history_tab(st, cur, conn):
                                 src_full or None,
                                 tgt_full or "",
                                 f"from trans_ext#{rid}",
+                                proj_domain or "",
                             ),
                         )
                         conn.commit()
@@ -86,8 +87,8 @@ def render_history_tab(st, cur, conn):
                     else:
                         cur.execute(
                             """
-                                INSERT INTO corpus (title, project_id, lang_pair, src_text, tgt_text, note, created_at)
-                                VALUES (?, ?, ?, ?, ?, ?, datetime('now'))
+                                INSERT INTO corpus (title, project_id, lang_pair, src_text, tgt_text, note, domain, created_at)
+                                VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'))
                             """,
                             (
                                 f"{proj_title} · history#{rid}",
@@ -96,6 +97,7 @@ def render_history_tab(st, cur, conn):
                                 src_full or None,
                                 tgt_full or "",
                                 f"from trans_ext#{rid}",
+                                proj_domain or "",
                             ),
                         )
                         conn.commit()
@@ -123,7 +125,7 @@ def render_history_tab(st, cur, conn):
                         model,
                         src_lang="zh",
                         tgt_lang="en",
-                        prefer_corpus_model=True,
+                        prefer_corpus_model=False,
                         default_domain=proj_domain,
                     )
                     res, dup_terms = dedup_terms_against_db(cur, res, pid)

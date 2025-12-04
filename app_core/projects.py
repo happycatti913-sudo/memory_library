@@ -41,7 +41,7 @@ def register_project_file(cur, conn, project_id, uploaded_files, base_dir=None):
 
         cur.execute(
             """
-            INSERT INTO project_files (project_id, file_path, file_name, created_at)
+            INSERT INTO project_files (project_id, file_path, file_name, uploaded_at)
             VALUES (?, ?, ?, datetime('now'))
             """,
             (project_id, full_path, safe_name),
@@ -107,7 +107,12 @@ def fetch_project_files(cur, project_id):
 
 def ensure_legacy_file_record(cur, conn, project_id, legacy_path):
     """Backfill legacy item_ext.src_path into project_files if needed."""
-    if not legacy_path or not os.path.exists(legacy_path):
+    # Ignore if caller passed a list/iterable of records instead of a single path.
+    if isinstance(legacy_path, (list, tuple, dict)):
+        return
+    if not legacy_path or not isinstance(legacy_path, (str, os.PathLike)):
+        return
+    if not os.path.exists(legacy_path):
         return
     cur.execute(
         """

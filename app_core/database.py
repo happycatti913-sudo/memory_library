@@ -173,6 +173,12 @@ def init_db():
             ("segments", "INTEGER"),
             ("term_hit_total", "INTEGER"),
         ],
+        "project_files": [
+            ("file_name", "TEXT"),
+            ("uploaded_at", "TEXT"),
+            ("note", "TEXT"),
+            ("created_at", "TEXT"),
+        ],
         "corpus": [
             ("title", "TEXT"),
             ("project_id", "INTEGER"),
