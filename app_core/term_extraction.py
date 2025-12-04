@@ -10,8 +10,6 @@ import json
 import re
 from typing import Iterable
 
-import requests
-
 try:  # 仅用于 UI 友好提示，不硬性依赖
     import streamlit as st  # type: ignore
 except Exception:  # pragma: no cover - CLI/测试环境
@@ -82,10 +80,8 @@ def extract_terms_with_corpus_model(
             out.append(x)
         return out
 
-    zh_candidates = _dedup_keep(re.findall(r"[\u4e00-\u9fa5]{2,8}", txt))
-    en_candidates = _dedup_keep(
-        re.findall(r"[A-Za-z0-9][A-Za-z0-9\-]{2,}(?: [A-Za-z0-9\-]{2,}){0,2}", txt)
-    )
+    zh_candidates = re.findall(r"[\u4e00-\u9fa5]{2,8}", txt)
+    en_candidates = re.findall(r"[A-Za-z0-9][A-Za-z0-9\-]{2,}(?: [A-Za-z0-9\-]{2,}){0,2}", txt)
     candidates = _dedup_keep(zh_candidates + en_candidates)
     if not candidates:
         if st:

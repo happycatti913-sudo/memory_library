@@ -75,5 +75,82 @@
     "title": "将就 · history#2",
     "lang_pair": "中译英",
     "kb_type": "bilingual"
+  },
+  {
+    "corpus_id": 8,
+    "idx": 0,
+    "src": "第十五条　审计人员办理审计事项，与被审计单位或者审计事项有利害关系的，应当回避。",
+    "tgt": "Article 15:",
+    "project_id": 2,
+    "domain": "经济",
+    "title": "将就 · history#2",
+    "lang_pair": "中译英",
+    "kb_type": "bilingual"
+  },
+  {
+    "corpus_id": 8,
+    "idx": 1,
+    "src": "第十六条　审计机关和审计人员对在执行职务中知悉的国家秘密、工作秘密、商业秘密、个人隐私和个人信息，应当予以保密，不得泄露或者向他人非法提供。",
+    "tgt": "Auditors shall recuse themselves from handling audit matters if they have an interest in the audited entity or the audit matters.",
+    "project_id": 2,
+    "domain": "经济",
+    "title": "将就 · history#2",
+    "lang_pair": "中译英",
+    "kb_type": "bilingual"
+  },
+  {
+    "corpus_id": 8,
+    "idx": 2,
+    "src": "第十七条　审计人员依法执行职务，受法律保护。",
+    "tgt": "Article 16:",
+    "project_id": 2,
+    "domain": "经济",
+    "title": "将就 · history#2",
+    "lang_pair": "中译英",
+    "kb_type": "bilingual"
+  },
+  {
+    "corpus_id": 8,
+    "idx": 3,
+    "src": "任何组织和个人不得拒绝、阻碍审计人员依法执行职务，不得打击报复审计人员。",
+    "tgt": "Audit institutions and auditors shall maintain confidentiality regarding state secrets, work secrets, trade secrets, personal privacy, and personal information that come to their knowledge in the performance of their duties, and shall not disclose or unlawfully provide such information to others.",
+    "project_id": 2,
+    "domain": "经济",
+    "title": "将就 · history#2",
+    "lang_pair": "中译英",
+    "kb_type": "bilingual"
+  },
+  {
+    "corpus_id": 8,
+    "idx": 4,
+    "src": "审计机关负责人依照法定程序任免。",
+    "tgt": "Article 17 Audit personnel are protected by law in the lawful performance of their duties.",
+    "project_id": 2,
+    "domain": "经济",
+    "title": "将就 · history#2",
+    "lang_pair": "中译英",
+    "kb_type": "bilingual"
+  },
+  {
+    "corpus_id": 8,
+    "idx": 5,
+    "src": "审计机关负责人没有违法失职或者其他不符合任职条件的情况的，不得随意撤换。",
+    "tgt": "No organization or individual may refuse or obstruct auditors from performing their duties in accordance with the law, nor may they retaliate against auditors.",
+    "project_id": 2,
+    "domain": "经济",
+    "title": "将就 · history#2",
+    "lang_pair": "中译英",
+    "kb_type": "bilingual"
+  },
+  {
+    "corpus_id": 8,
+    "idx": 6,
+    "src": "地方各级审计机关负责人的任免，应当事先征求上一级审计机关的意见。",
+    "tgt": "The head of an audit institution shall be appointed or removed in accordance with statutory procedures.",
+    "project_id": 2,
+    "domain": "经济",
+    "title": "将就 · history#2",
+    "lang_pair": "中译英",
+    "kb_type": "bilingual"
   }
 ]
