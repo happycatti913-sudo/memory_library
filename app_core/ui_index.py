@@ -1,6 +1,10 @@
 # -*- coding: utf-8 -*-
 """索引管理相关的 Streamlit UI 组件。"""
 
+import json
+import os
+from datetime import datetime
+
 import streamlit as st
 import pandas as pd
 
@@ -11,7 +15,97 @@ from app_core.semantic_index import (
     build_strategy_index_for_domain,
     rebuild_project_semantic_index,
 )
+from app_core.config import SEM_INDEX_ROOT
 from app_core.text_utils import _split_pair_for_index
+
+
+def _collect_index_overview():
+    """扫描语义索引根目录，生成按“领域/类型”分类的索引列表。"""
+
+    overview = []
+    if not os.path.exists(SEM_INDEX_ROOT):
+        return overview
+
+    for domain in sorted(os.listdir(SEM_INDEX_ROOT)):
+        domain_dir = os.path.join(SEM_INDEX_ROOT, domain)
+        if not os.path.isdir(domain_dir):
+            continue
+
+        for kb_type in sorted(os.listdir(domain_dir)):
+            type_dir = os.path.join(domain_dir, kb_type)
+            if not os.path.isdir(type_dir):
+                continue
+
+            idx_path = os.path.join(type_dir, "index.faiss")
+            vec_path = os.path.join(type_dir, "vectors.npy")
+            map_path = os.path.join(type_dir, "mapping.json")
+
+            entry_cnt = 0
+            try:
+                if os.path.exists(map_path):
+                    with open(map_path, "r", encoding="utf-8") as f:
+                        mapping = json.load(f)
+                        if isinstance(mapping, list):
+                            entry_cnt = len(mapping)
+            except Exception:
+                entry_cnt = 0
+
+            mode = "未生成"
+            size_bytes = 0
+            mtimes = []
+            for pth, label in [(idx_path, "faiss"), (vec_path, "npy"), (map_path, "mapping")]:
+                if os.path.exists(pth):
+                    mtimes.append(os.path.getmtime(pth))
+                    size_bytes += os.path.getsize(pth)
+                    if mode == "未生成":
+                        mode = label
+
+            overview.append(
+                {
+                    "领域": domain,
+                    "类型": kb_type,
+                    "条目数": entry_cnt,
+                    "文件状态": mode,
+                    "合计大小(MB)": round(size_bytes / 1024 / 1024, 2) if size_bytes else 0,
+                    "最近更新时间": datetime.fromtimestamp(max(mtimes)).strftime("%Y-%m-%d %H:%M")
+                    if mtimes
+                    else "-",
+                    "存储目录": os.path.relpath(type_dir, start=os.path.dirname(SEM_INDEX_ROOT)),
+                }
+            )
+
+    return overview
+
+
+def render_index_overview(st):
+    """可视化展示已有索引列表，方便查看索引种类与分类。"""
+
+    st.markdown("### 🗂️ 索引总览（按领域/类型分类）")
+    overview = _collect_index_overview()
+    if not overview:
+        st.info("当前没有生成任何索引。请先在项目或领域页中构建索引。")
+        return
+
+    df = pd.DataFrame(overview)
+
+    type_options = sorted(df["类型"].unique())
+    dom_options = sorted(df["领域"].unique())
+
+    c1, c2 = st.columns(2)
+    with c1:
+        type_sel = st.multiselect("按索引类型过滤", type_options, default=type_options)
+    with c2:
+        dom_sel = st.multiselect("按领域过滤", dom_options, default=dom_options)
+
+    df_filtered = df[df["类型"].isin(type_sel) & df["领域"].isin(dom_sel)]
+    st.dataframe(df_filtered, use_container_width=True)
+
+    st.markdown("#### 分类统计")
+    grouped = df_filtered.groupby(["领域", "类型"], as_index=False)["条目数"].sum()
+    if grouped.empty:
+        st.write("无匹配的索引。")
+        return
+    st.dataframe(grouped, use_container_width=True)
 
 
 def render_index_manager(st, conn, cur):
@@ -134,6 +228,9 @@ def render_index_manager(st, conn, cur):
 def render_index_manager_by_domain(st, conn, cur):
     """按领域管理语义索引与策略索引。"""
     st.title("🧠 按领域管理索引与策略库")
+
+    render_index_overview(st)
+    st.markdown("---")
 
     domains = set()
     try:

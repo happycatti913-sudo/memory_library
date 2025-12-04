@@ -56,7 +56,7 @@ def render_history_tab(st, cur, conn):
             with st.expander("原文预览(若上传了源文件)", expanded=False):
                 st.text_area("原文全文", src_full or "(未保存/未上传源文件)", height=160, key=f"hist_src_{rid}")
 
-            c1, c2, c3, c4, c5 = st.columns(5)
+            c1, c2, c3, c4 = st.columns(4)
 
             with c1:
                 if st.button("➕ 添加进语料库", key=f"hist_add_corpus_{rid}"):
@@ -178,7 +178,23 @@ def render_history_tab(st, cur, conn):
                         st.success(msg)
 
             with c3:
-                if st.button("⬇️ CSV 对照", key=f"hist_dl_bicsv_btn_{rid}"):
+                st.markdown("**⬇️ 下载译文与对照**")
+                fmt = st.selectbox(
+                    "请选择导出格式",
+                    ["TXT（仅译文）", "DOCX 对照", "CSV 对照"],
+                    index=0,
+                    key=f"hist_dl_fmt_{rid}",
+                )
+
+                if fmt.startswith("TXT"):
+                    st.download_button(
+                        "下载译文 (TXT)",
+                        data=tgt_full or "",
+                        file_name=f"translation_history_{rid}.txt",
+                        mime="text/plain",
+                        key=f"hist_dl_txt_{rid}",
+                    )
+                elif fmt.startswith("CSV"):
                     if not src_full:
                         st.warning("找不到原文(未上传源文件).无法生成 CSV 对照")
                     else:
@@ -189,15 +205,13 @@ def render_history_tab(st, cur, conn):
                             csv_name = f"bilingual_history_{rid}.csv"
                             csv_bytes = export_csv_bilingual(src_full, tgt_full)
                         st.download_button(
-                            "下载 CSV",
+                            "下载 CSV 对照",
                             data=csv_bytes,
                             file_name=csv_name,
                             mime="text/csv",
                             key=f"hist_dl_bicsv_{rid}",
                         )
-
-            with c4:
-                if st.button("⬇️ DOCX 对照", key=f"hist_dl_bidocx_btn_{rid}"):
+                else:  # DOCX
                     if not src_full:
                         st.warning("找不到原文(未上传源文件).无法生成 DOCX 对照")
                     else:
@@ -208,14 +222,14 @@ def render_history_tab(st, cur, conn):
                         except TypeError:
                             data_docx = export_docx_bilingual(src_full, tgt_full)
                         st.download_button(
-                            "下载 DOCX",
+                            "下载 DOCX 对照",
                             data=data_docx,
                             file_name=f"bilingual_history_{rid}.docx",
                             mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
                             key=f"hist_dl_bidocx_{rid}",
                         )
 
-            with c5:
+            with c4:
                 with st.expander("🗑 删除本条历史(不可恢复)", expanded=False):
                     st.warning("此操作将永久删除该条 trans_ext 记录(不影响已写入语料库/术语表的数据)。")
                     ok = st.checkbox(f"我确认删除 #{rid}", key=f"hist_del_ck_{rid}")
@@ -225,10 +239,3 @@ def render_history_tab(st, cur, conn):
                         st.success("已删除.请刷新页面查看结果。")
                         st.stop()
 
-            st.download_button(
-                "下载译文 (TXT)",
-                tgt_full or "",
-                file_name=f"history_{rid}.txt",
-                mime="text/plain",
-                key=f"hist_dl_txt_{rid}",
-            )
