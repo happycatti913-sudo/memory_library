@@ -68,8 +68,6 @@ def init_db():
     conn = sqlite3.connect(DB_PATH, check_same_thread=False)
     cur = conn.cursor()
 
-    ensure_domain_columns_and_backfill(conn, cur, corpus_table="corpus")
-
     cur.execute("""
     CREATE TABLE IF NOT EXISTS items (
         id INTEGER PRIMARY KEY,
@@ -143,6 +141,9 @@ def init_db():
     """)
     conn.commit()
 
+    # Ensure domain columns/backfill after base tables exist.
+    ensure_domain_columns_and_backfill(conn, cur, corpus_table="corpus")
+
     for t, cols in {
         "items": [
             ("type", "TEXT"),
@@ -165,6 +166,9 @@ def init_db():
             ("category", "TEXT"),
         ],
         "trans_ext": [
+            ("src_path", "TEXT"),
+            ("output_text", "TEXT"),
+            ("lang_pair", "TEXT"),
             ("stats_json", "TEXT"),
             ("segments", "INTEGER"),
             ("term_hit_total", "INTEGER"),

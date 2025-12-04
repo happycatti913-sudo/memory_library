@@ -273,6 +273,11 @@ def split_sents(
     return [x for x in pieces if len(x) >= min_char]
 
 
+def split_sen(text: str, lang: str = "auto", **kwargs):
+    """Compat wrapper for legacy `split_sen` name."""
+    return split_sents(text, lang_hint=lang, **kwargs)
+
+
 def _split_pair_for_index(src_text: str, tgt_text: str) -> Tuple[list[str], list[str]]:
     try:
         return split_sents(src_text, lang_hint="zh"), split_sents(tgt_text, lang_hint="en")

@@ -5,6 +5,7 @@ from __future__ import annotations
 import streamlit as st
 
 from .config import _project_domain, dedup_terms_against_db
+from .database import ensure_col
 from .file_ops import export_csv_bilingual, export_docx_bilingual, read_source_file
 from .semantic_index import rebuild_project_semantic_index
 from .term_extraction import _locate_example_pair, ds_extract_terms
@@ -14,6 +15,13 @@ from .translation_ops import get_deepseek
 
 def render_history_tab(st, cur, conn):
     st.subheader("📊 翻译历史记录(可写入语料 / 抽取术语 / 下载对照 / 删除)")
+
+    try:
+        ensure_col(conn, cur, "trans_ext", "lang_pair", "TEXT")
+        ensure_col(conn, cur, "trans_ext", "output_text", "TEXT")
+        ensure_col(conn, cur, "trans_ext", "src_path", "TEXT")
+    except Exception:
+        pass
 
     rows = cur.execute(
         """

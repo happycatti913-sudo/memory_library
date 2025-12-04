@@ -342,12 +342,8 @@ def render_project_tab(st, cur, conn, base_dir, use_semantic=True):
 
             up_files = st.file_uploader("上传新文件", accept_multiple_files=True, key=f"upload_{pid}")
             if up_files:
-                saved = 0
-                file_records, processed_key = register_project_file(cur, conn, pid, up_files, base_dir)
-                if processed_key:
-                    saved = len(processed_key)
-                else:
-                    st.session_state.pop(processed_key, None)
+                file_records, saved_paths = register_project_file(cur, conn, pid, up_files, base_dir)
+                saved = len(saved_paths)
 
                 if file_records:
                     st.markdown("附件列表:")

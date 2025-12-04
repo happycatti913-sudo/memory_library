@@ -1,10 +1,5 @@
 # -*- coding: utf-8 -*-
-"""项目文件管理与少样本引用工具。
-
-- 上传/清理项目附件
-- 记录少样本引用 ID 与开关状态
-- 读取少样本语料示例
-"""
+"""Project file management and few-shot helpers."""
 from __future__ import annotations
 
 import os
@@ -16,31 +11,45 @@ import streamlit as st
 from .config import PROJECT_DIR
 
 
-def register_project_file(cur, conn, project_id, file_name, data_bytes):
-    """将上传的文件保存到项目目录，并记录在 ``project_files`` 表中。"""
-    if not project_id or not data_bytes:
-        return None
+def register_project_file(cur, conn, project_id, uploaded_files, base_dir=None):
+    """
+    Save uploaded files to the project directory and record them.
 
-    safe_name = os.path.basename(file_name) or f"project_{project_id}_file"
+    Accepts a list of Streamlit UploadedFile objects.
+    Returns (file_records, saved_paths).
+    """
+    if not project_id or not uploaded_files:
+        return [], []
+
+    saved_paths: list[str] = []
     proj_dir = os.path.join(PROJECT_DIR, f"project_{project_id}")
     os.makedirs(proj_dir, exist_ok=True)
 
-    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    uniq_name = f"{stamp}_{uuid.uuid4().hex[:6]}_{safe_name}"
-    full_path = os.path.join(proj_dir, uniq_name)
+    for uf in uploaded_files:
+        try:
+            safe_name = os.path.basename(getattr(uf, "name", "") or "") or f"project_{project_id}_file"
+            data_bytes = uf.getvalue()
+        except Exception:
+            continue
 
-    with open(full_path, "wb") as f:
-        f.write(data_bytes)
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        uniq_name = f"{stamp}_{uuid.uuid4().hex[:6]}_{safe_name}"
+        full_path = os.path.join(proj_dir, uniq_name)
 
-    cur.execute(
-        """
-        INSERT INTO project_files (project_id, file_path, file_name, created_at)
-        VALUES (?, ?, ?, datetime('now'))
-        """,
-        (project_id, full_path, safe_name),
-    )
+        with open(full_path, "wb") as f:
+            f.write(data_bytes)
+
+        cur.execute(
+            """
+            INSERT INTO project_files (project_id, file_path, file_name, created_at)
+            VALUES (?, ?, ?, datetime('now'))
+            """,
+            (project_id, full_path, safe_name),
+        )
+        saved_paths.append(full_path)
     conn.commit()
-    return full_path
+
+    return fetch_project_files(cur, project_id), saved_paths
 
 
 def remove_project_file(cur, conn, file_id):
@@ -97,7 +106,7 @@ def fetch_project_files(cur, project_id):
 
 
 def ensure_legacy_file_record(cur, conn, project_id, legacy_path):
-    """将旧版的 ``item_ext.src_path`` 补录到 ``project_files``。"""
+    """Backfill legacy item_ext.src_path into project_files if needed."""
     if not legacy_path or not os.path.exists(legacy_path):
         return
     cur.execute(
@@ -111,7 +120,7 @@ def ensure_legacy_file_record(cur, conn, project_id, legacy_path):
 
 
 def _ensure_project_ref_map():
-    """确保 ``session_state['corpus_refs']`` 为 ``{project_id: set(ids)}`` 结构。"""
+    """Ensure session_state['corpus_refs'] exists as {project_id: set(ids)}."""
     refs = st.session_state.get("corpus_refs")
     if isinstance(refs, dict):
         return refs
@@ -120,7 +129,7 @@ def _ensure_project_ref_map():
 
 
 def _ensure_project_switch_map():
-    """确保 ``session_state['cor_use_ref']`` 为 ``{project_id: bool}`` 结构。"""
+    """Ensure session_state['cor_use_ref'] exists as {project_id: bool}."""
     switches = st.session_state.get("cor_use_ref")
     if isinstance(switches, dict):
         return switches
