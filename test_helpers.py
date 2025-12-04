@@ -27,7 +27,7 @@ def load_helpers(extra_funcs: set[str] | None = None):
     helper_ast = ast.fix_missing_locations(helper_ast)
     exec(compile(helper_ast, "1127.py", "exec"), module.__dict__)
 
-    # 再从拆分出来的 config 模块补齐缺失函数
+    # 再从拆分出来的各模块补齐缺失函数
     remaining = targets.difference(module.__dict__)
     if remaining:
         cfg_source = Path(__file__).parent.joinpath("app_core", "config.py").read_text(encoding="utf-8")
@@ -41,6 +41,20 @@ def load_helpers(extra_funcs: set[str] | None = None):
             cfg_ast = ast.Module(body=cfg_body, type_ignores=[])
             cfg_ast = ast.fix_missing_locations(cfg_ast)
             exec(compile(cfg_ast, "config.py", "exec"), module.__dict__)
+
+    remaining = targets.difference(module.__dict__)
+    if remaining:
+        trans_source = Path(__file__).parent.joinpath("app_core", "translation_ops.py").read_text(encoding="utf-8")
+        trans_tree = ast.parse(trans_source)
+        trans_body = [
+            node
+            for node in trans_tree.body
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name in remaining
+        ]
+        if trans_body:
+            trans_ast = ast.Module(body=trans_body, type_ignores=[])
+            trans_ast = ast.fix_missing_locations(trans_ast)
+            exec(compile(trans_ast, "translation_ops.py", "exec"), module.__dict__)
 
     return module
 

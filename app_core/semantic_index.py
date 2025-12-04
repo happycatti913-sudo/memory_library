@@ -8,7 +8,9 @@ from typing import Callable
 
 import streamlit as st
 
-from .config import _index_paths, _index_paths_domain, log_event
+from app_core.database import _get_domain_for_proj
+
+from .config import _index_paths, _index_paths_domain, _norm_domain_key, log_event
 
 
 def _lazy_import_vec():
@@ -362,3 +364,41 @@ def rebuild_project_semantic_index(cur, project_id: int, *, split_fn: Callable[[
             "total": 0,
             "msg": f"索引重建失败: {e}",
         }
+
+
+def quick_diagnose_vectors(pid: int, cur=None):
+    """打印/提示项目向量索引状态，便于排查语义召回为空等问题。"""
+    try:
+        mode, index, mapping, vecs = _load_index(pid)
+        if mode == "none":
+            dom = None
+            try:
+                if cur is not None:
+                    dom = _get_domain_for_proj(cur, int(pid))
+            except Exception:
+                dom = None
+            dom_key = _norm_domain_key(dom)
+            st.warning(
+                f"项目 {pid} 尚未建立向量索引(semantic_index/{dom_key}/bilingual 下无索引文件)。"
+            )
+            return
+        msg = f"索引模式: {mode}; 映射条数: {len(mapping)}"
+
+        if mode == "faiss" and index is not None:
+            msg += f"; FAISS ntotal: {index.ntotal}"
+        elif vecs is not None:
+            msg += f"; NPY shape: {getattr(vecs, 'shape', None)}"
+        st.info(msg)
+
+        bad = 0
+        if cur is not None:
+            for m in mapping[:10]:
+                cid = int(m.get("corpus_id") or -1)
+                row = cur.execute("SELECT id FROM corpus WHERE id=?", (cid,)).fetchone()
+                if not row:
+                    bad += 1
+        if bad:
+            st.warning(f"映射中有 {bad} 条 corpus_id 无法回查.请考虑重建索引。")
+    except Exception as e:
+        st.error(f"向量诊断异常:{e}")
+
