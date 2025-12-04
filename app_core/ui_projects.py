@@ -331,11 +331,18 @@ def render_project_tab(st, cur, conn, base_dir, use_semantic=True):
 
         with st.expander("📎 源文件管理"):
             file_records = fetch_project_files(cur, pid)
+            file_options = [r["path"] for r in file_records] if file_records else []
             selected_src_path = st.selectbox(
                 "选择已上传文件作为源文件",
-                [r["path"] for r in file_records] if file_records else [],
+                file_options,
                 key=f"sel_src_{pid}",
-            ) if file_records else None
+            ) if file_options else None
+
+            batch_src_paths = st.multiselect(
+                "批量选择源文件 (顺序按列表显示)",
+                file_options,
+                key=f"batch_src_{pid}"
+            ) if file_options else []
 
             # 兼容旧数据：若 item_ext 为空但 items.body 有文件内容，则补录
             ensure_legacy_file_record(cur, conn, pid, src_path)
@@ -346,25 +353,24 @@ def render_project_tab(st, cur, conn, base_dir, use_semantic=True):
                 saved_names = st.session_state.get(saved_names_key, set())
                 new_files = [uf for uf in up_files if uf.name not in saved_names]
 
-                file_records, saved_paths = ([], [])
                 if new_files:
                     file_records, saved_paths = register_project_file(cur, conn, pid, new_files, base_dir)
                     saved_names.update([uf.name for uf in new_files])
                     st.session_state[saved_names_key] = saved_names
 
-                saved = len(saved_paths)
-
-                if file_records:
-                    st.markdown("附件列表:")
-                    for rec in file_records:
-                        info_cols = st.columns([5, 1])
-                        info = f"[#{rec['id']}] {rec['name']}｜{os.path.basename(rec['path'])}"
-                        if rec["uploaded_at"]:
-                            info += f"｜{rec['uploaded_at']}"
-                        info_cols[0].write(info)
-                        if info_cols[1].button("删除", key=f"del_file_{rec['id']}"):
-                            remove_project_file(cur, conn, rec["id"])
-                            st.rerun()
+            # 显示并允许删除附件（无论是否刚上传）
+            file_records = fetch_project_files(cur, pid)
+            if file_records:
+                st.markdown("附件列表:")
+                for rec in file_records:
+                    info_cols = st.columns([5, 1])
+                    info = f"[#{rec['id']}] {rec['name']}｜{os.path.basename(rec['path'])}"
+                    if rec["uploaded_at"]:
+                        info += f"｜{rec['uploaded_at']}"
+                    info_cols[0].write(info)
+                    if info_cols[1].button("删除", key=f"del_file_{rec['id']}"):
+                        remove_project_file(cur, conn, rec["id"])
+                        st.rerun()
 
             # 删除项目
             if st.button("删除项目", key=f"del_proj_{pid}"):
@@ -375,7 +381,7 @@ def render_project_tab(st, cur, conn, base_dir, use_semantic=True):
                 st.success("项目已删除")
                 st.rerun()
 
-        # —— 执行翻译
+        # —— 执行翻译（单文件 / 批量）
         if st.button("执行翻译", key=f"run_{pid}", type="primary"):
             run_project_translation_ui(
                 pid=pid,
@@ -384,6 +390,18 @@ def render_project_tab(st, cur, conn, base_dir, use_semantic=True):
                 conn=conn,
                 cur=cur,
             )
+
+        if batch_src_paths:
+            if st.button("批量翻译所选源文件", key=f"run_batch_{pid}", type="secondary"):
+                for idx_batch, batch_path in enumerate(batch_src_paths, start=1):
+                    st.markdown(f"### 批量翻译 {idx_batch}/{len(batch_src_paths)} ｜ {os.path.basename(batch_path)}")
+                    run_project_translation_ui(
+                        pid=pid,
+                        project_title=title,
+                        src_path=batch_path,
+                        conn=conn,
+                        cur=cur,
+                    )
 
         # —— 新增：进入翻译工作台（可编辑）
         if st.button("进入翻译工作台（可编辑）", key=f"workspace_{pid}", type="secondary"):
