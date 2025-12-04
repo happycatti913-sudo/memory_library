@@ -5,6 +5,11 @@ from __future__ import annotations
 import re
 from typing import Iterable
 
+try:  # 仅用于 UI 友好提示，不硬性依赖
+    import streamlit as st  # type: ignore
+except Exception:  # pragma: no cover - CLI/测试环境
+    st = None
+
 from app_core.semantic_index import get_embedder
 from app_core.text_utils import _norm_text, split_sents
 
@@ -54,6 +59,8 @@ def extract_terms_with_corpus_model(
     """使用语料向量模型抽取术语并生成结构化条目。"""
     txt = (text or "").strip()
     if not txt:
+        if st:
+            st.warning("输入语料为空，请输入包含术语的文本（不少于 1-2 个词）。")
         return []
 
     backend, encode = get_embedder()
@@ -69,9 +76,13 @@ def extract_terms_with_corpus_model(
         return out
 
     zh_candidates = re.findall(r"[\u4e00-\u9fa5]{2,8}", txt)
-    en_candidates = re.findall(r"[A-Za-z][A-Za-z\-]{2,}(?: [A-Za-z\-]{2,}){0,2}", txt)
+    en_candidates = re.findall(r"[A-Za-z0-9][A-Za-z0-9\-]{2,}(?: [A-Za-z0-9\-]{2,}){0,2}", txt)
     candidates = _dedup_keep(zh_candidates + en_candidates)
     if not candidates:
+        if st:
+            st.info(
+                "未找到满足正则的术语候选，请检查文本是否只包含数字/符号，或术语长度不在 2-8 字、3-15 字符范围内。"
+            )
         return []
 
     doc_emb = encode([txt])[0]
@@ -110,9 +121,9 @@ def extract_terms_with_corpus_model(
 
 
 def ds_extract_terms(
+    text: str,
     ak: str,
     model: str,
-    text: str,
     *,
     src_lang: str = "zh",
     tgt_lang: str = "en",
