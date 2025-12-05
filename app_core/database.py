@@ -155,6 +155,9 @@ def init_db():
             ("created_at", "TEXT"),
             ("updated_at", "TEXT"),
             ("trans_type", "TEXT"),
+            ("lang_pair", "TEXT"),
+            ("semantic_scope", "TEXT"),
+            ("use_semantic", "TEXT"),
         ],
         "item_ext": [("src_path", "TEXT")],
         "term_ext": [

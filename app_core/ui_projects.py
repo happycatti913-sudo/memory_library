@@ -9,17 +9,20 @@ from app_core.projects import (
     cleanup_project_files,
     ensure_legacy_file_record,
     fetch_project_files,
+    get_project_fewshot_enabled,
     get_project_fewshot_examples,
+    get_project_ref_ids,
     register_project_file,
     remove_project_file,
+    set_project_fewshot_enabled,
 )
-from app_core.semantic_ops import semantic_consistency_report
+from app_core.semantic_ops import semantic_consistency_report, semantic_retrieve
 from app_core.text_utils import split_paragraphs, split_sents
 from app_core.term_ops import get_terms_for_project
 from app_core.translation_ops import get_deepseek, translate_block_with_kb
 
 
-def run_project_translation_ui(pid, project_title, src_path, conn, cur):
+def run_project_translation_ui(pid, project_title, src_path, conn, cur, lang_pair, use_semantic, scope_val):
     """执行翻译 UI + 逻辑（从 1127.py 抽取）。"""
 
     st.subheader(f"📘 项目：{project_title}")
@@ -59,9 +62,9 @@ def run_project_translation_ui(pid, project_title, src_path, conn, cur):
 
     st.info(f"按段落切分，共 {len(blocks)} 段，开始翻译…")
 
-    lang_pair_val = st.session_state.get(f"lang_{pid}", "中译英")
-    use_semantic = bool(st.session_state.get(f"use_sem_{pid}", True))
-    scope_val = st.session_state.get(f"scope_{pid}", st.session_state.get("scope_newproj", "project"))
+    lang_pair_val = lang_pair or "中译英"
+    use_semantic_val = bool(use_semantic) if use_semantic is not None else True
+    scope_value = scope_val or "project"
 
     # 4) 循环翻译（统一走 translate_block_with_kb 管线）
     # 先加载 few-shot 示例（项目级）
@@ -97,8 +100,8 @@ def run_project_translation_ui(pid, project_title, src_path, conn, cur):
             lang_pair=lang_pair_val,
             ak=ak,
             model=model,
-            use_semantic=use_semantic,
-            scope=scope_val,
+            use_semantic=use_semantic_val,
+            scope=scope_value,
             fewshot_examples=fewshot_examples,
         )
 
@@ -218,11 +221,46 @@ def run_project_translation_ui(pid, project_title, src_path, conn, cur):
 # ====== Tab1 UI ======
 
 def render_project_tab(st, cur, conn, base_dir, use_semantic=True):
+    st.markdown(
+        """
+        <style>
+        [data-testid="stAppViewContainer"] {
+            background: radial-gradient(circle at 20% 20%, rgba(0, 201, 255, 0.12), transparent 35%),
+                        radial-gradient(circle at 80% 0%, rgba(0, 124, 255, 0.10), transparent 30%),
+                        linear-gradient(135deg, #0a0f1f 0%, #0f172a 50%, #0b1226 100%);
+        }
+        .glass-panel {
+            padding: 18px 22px;
+            border-radius: 16px;
+            background: rgba(255, 255, 255, 0.06);
+            border: 1px solid rgba(255, 255, 255, 0.08);
+            box-shadow: 0 12px 40px rgba(0,0,0,0.35);
+            backdrop-filter: blur(8px);
+        }
+        .accent-chip {
+            display: inline-block;
+            padding: 4px 10px;
+            margin-right: 6px;
+            border-radius: 999px;
+            background: linear-gradient(120deg, #46c8ff, #7c5dff);
+            color: white;
+            font-weight: 600;
+            font-size: 12px;
+        }
+        .meta-row {
+            color: #cbd5e1;
+            font-size: 13px;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
     st.subheader("翻译项目管理")
     with st.form("new_project"):
         TAG_OPTIONS = ["政治", "经济", "文化", "文物", "金融", "法律"]
         SCENE_OPTIONS = ["学术", "配音稿", "正式会议"]
-        use_semantic = st.checkbox("在翻译时启用语义召回参考", value=True)
+        use_semantic_val = st.checkbox("在翻译时启用语义召回参考", value=True)
 
         # === 语义召回范围选择 ===
         scope_label = "语义召回范围"
@@ -238,7 +276,8 @@ def render_project_tab(st, cur, conn, base_dir, use_semantic=True):
             index=list(scope_options.keys()).index(default_scope),
             key="scope_sel_newproj"
         )
-        st.session_state["scope_newproj"] = scope_options[sel]
+        scope_value = scope_options[sel]
+        lang_pair_val = st.selectbox("翻译方向", ["中译英", "英译中"], index=0, key="new_proj_lang_pair")
 
         c1, c2 = st.columns([3, 2])
         with c1:
@@ -246,16 +285,10 @@ def render_project_tab(st, cur, conn, base_dir, use_semantic=True):
             tags_sel = st.multiselect("项目标签(可多选)", TAG_OPTIONS)
             scene_sel = st.selectbox("场合", SCENE_OPTIONS, index=0)
         with c2:
-            translation_type = st.selectbox("翻译方式", ["使用术语库", "纯机器翻译"])
+            translation_type = st.selectbox("翻译方式", ["使用术语库", "纯机器翻译"], key="new_proj_trans_type")
             translation_mode = st.radio("模式", ["标准模式", "术语约束模式"], horizontal=True)
-            prompt_text = st.text_area(
-                "翻译提示(注入模型 System Prompt)",
-                placeholder="写下对 DeepSeek 的硬性/优先级指令.如:时态统一为过去式.专有名词保持原文……",
-                height=120,
-                key="new_proj_prompt",
-            )
+            st.info("项目 Prompt 仅在下方项目列表中编辑与展示。")
         # === 领域自动绑定逻辑 ===
-        # 若用户选择了多个标签.则默认以第一个标签为领域
         domain_val = tags_sel[0] if tags_sel else None
 
         # === 提交按钮 ===
@@ -265,23 +298,26 @@ def render_project_tab(st, cur, conn, base_dir, use_semantic=True):
                 st.error("请填写项目名称")
             else:
                 try:
-                    # 确保 items 表存在 domain 字段
-                    cur.execute("PRAGMA table_info(items);")
-                    cols = [r[1] for r in cur.fetchall()]
-                    if "domain" not in cols:
-                        cur.execute("ALTER TABLE items ADD COLUMN domain TEXT;")
-                        conn.commit()
-
-                    # 插入新项目(含 domain)
-                    cur.execute("""
-                        INSERT INTO items(title, body, tags, domain,type)
-                        VALUES (?, ?, ?, ?, 'project')
-                    """, (
-                        title,
-                        prompt_text or "",
-                        ",".join(tags_sel or []),
-                        domain_val
-                    ))
+                    # 插入新项目(含 domain / 语义召回 / 语对)
+                    cur.execute(
+                        """
+                        INSERT INTO items(title, body, tags, domain, type, scene, prompt, mode, trans_type, lang_pair, semantic_scope, use_semantic)
+                        VALUES (?, ?, ?, ?, 'project', ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            title,
+                            "",  # 预留 body
+                            ",".join(tags_sel or []),
+                            domain_val,
+                            scene_sel,
+                            "",  # prompt 创建后在列表中编辑
+                            translation_mode,
+                            translation_type,
+                            lang_pair_val,
+                            scope_value,
+                            "1" if use_semantic_val else "0",
+                        ),
+                    )
                     conn.commit()
 
                     st.success(f"✅ 项目 '{title}' 已创建(领域:{domain_val or '未指定'})")
@@ -294,12 +330,16 @@ def render_project_tab(st, cur, conn, base_dir, use_semantic=True):
             i.id,
             i.title,
             COALESCE(i.tags,'')              AS tags,
+            COALESCE(i.domain,'')            AS domain,
             COALESCE(MIN(e.src_path),'')     AS src_path,
             COALESCE(i.created_at,'')        AS created_at,
             COALESCE(i.scene,'')             AS scene,
             COALESCE(i.prompt,'')            AS prompt,
             COALESCE(i.mode,'')              AS mode,
-            COALESCE(i.trans_type,'')        AS trans_type
+            COALESCE(i.trans_type,'')        AS trans_type,
+            COALESCE(i.lang_pair,'')         AS lang_pair,
+            COALESCE(i.semantic_scope,'')    AS semantic_scope,
+            COALESCE(i.use_semantic,'')      AS use_semantic
         FROM items i
         LEFT JOIN item_ext e ON e.item_id = i.id
         WHERE COALESCE(i.type,'')='project'
@@ -312,30 +352,130 @@ def render_project_tab(st, cur, conn, base_dir, use_semantic=True):
         st.info("暂无项目")
         return
 
+    # 领域筛选下拉
+    domain_idx = 3  # SELECT 顺序对应的字段索引
+    domains = sorted({r[domain_idx] for r in rows if (r[domain_idx] or "").strip()})
+    sel_domain = st.selectbox(
+        "按领域筛选项目",
+        ["全部领域"] + domains,
+        key="proj_domain_filter",
+    )
+    filtered_rows = [r for r in rows if sel_domain == "全部领域" or r[domain_idx] == sel_domain]
+    if not filtered_rows:
+        st.info("该领域下暂无项目")
+        return
+
     # 显示项目列表
-    for idx, row in enumerate(rows):
-        pid, title, tags, src_path, created_at, scene, prompt_text, mode, trans_type = row
+    for idx, row in enumerate(filtered_rows):
+        pid, title, tags, domain, src_path, created_at, scene, prompt_text, mode, trans_type, lang_pair, semantic_scope, use_sem_flag = row
         st.markdown(f"### #{pid}｜{title}")
 
         col_meta, col_actions = st.columns([3, 2])
         with col_meta:
-            st.caption(f"标签: {tags} ｜ 场合: {scene} ｜ 创建: {created_at}")
-            st.caption(f"模式: {mode or translation_mode} ｜ 翻译方式: {trans_type or translation_type}")
-            st.text_area("项目 Prompt", prompt_text or "(未设置)", height=80, key=f"prompt_{pid}")
+            st.markdown(
+                f"<div class='glass-panel'>"
+                f"<div class='meta-row'>标签: {tags or '未设置'} ｜ 领域: {domain or '未设置'} ｜ 场合: {scene or '未设置'} ｜ 创建: {created_at}</div>"
+                f"<div class='meta-row'>模式: {mode or '标准模式'} ｜ 翻译方式: {trans_type or '使用术语库'}</div>"
+                f"<div style='margin-top:6px;'>"
+                f"<span class='accent-chip'>翻译方向：{lang_pair or '中译英'}</span>"
+                f"<span class='accent-chip'>召回范围：{semantic_scope or 'project'}</span>"
+                f"<span class='accent-chip'>语义召回：{'开启' if (use_sem_flag or '1') not in ('0', 'False', 'false') else '关闭'}</span>"
+                f"</div>"
+                f"</div>",
+                unsafe_allow_html=True,
+            )
+
+            with st.form(f"prompt_form_{pid}"):
+                updated_prompt = st.text_area("项目 Prompt", prompt_text or "(未设置)", height=80, key=f"prompt_{pid}")
+                if st.form_submit_button("💾 保存 Prompt"):
+                    cur.execute(
+                        "UPDATE items SET prompt=?, updated_at=datetime('now') WHERE id=?",
+                        (updated_prompt, pid),
+                    )
+                    conn.commit()
+                    st.success("Prompt 已更新")
+                    st.experimental_rerun()
 
         with col_actions:
-            # 几个快速设置
-            st.checkbox("启用语义召回参考", value=True, key=f"use_sem_{pid}")
-            st.text_input("语义召回范围(scope)", st.session_state.get("scope_newproj", "project"), key=f"scope_{pid}")
-            st.selectbox("翻译方向", ["中译英", "英译中"], index=0, key=f"lang_{pid}")
+            st.markdown(
+                """
+                <div class='glass-panel'>
+                    <div class='meta-row'>翻译方向、语义召回范围只在新建项目时设定。</div>
+                    <div class='meta-row'>当前配置将用于所有翻译动作。</div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+
+        with st.expander("🎯 Few-shot 选项（语义召回索引）", expanded=False):
+            current_switch = get_project_fewshot_enabled(pid)
+            toggle = st.checkbox(
+                "翻译时注入 Few-shot 提示", value=current_switch, key=f"fewshot_switch_{pid}"
+            )
+            if st.button("保存 Few-shot 开关", key=f"save_fs_switch_{pid}"):
+                set_project_fewshot_enabled(pid, toggle)
+                st.success("Few-shot 开关已更新")
+
+            st.caption(
+                f"已选参考数: {len(get_project_ref_ids(pid))} (来自语料库/索引召回)"
+            )
+
+            query_text = st.text_area(
+                "输入查询文本(将按项目索引语义召回并作为 Few-shot 候选)",
+                key=f"fs_query_{pid}",
+                height=80,
+            )
+            topk_val = st.slider(
+                "召回条数", min_value=3, max_value=30, value=8, step=1, key=f"fs_topk_{pid}"
+            )
+            fs_hits_key = f"fs_hits_{pid}"
+            scope_val = semantic_scope or "project"
+            if st.button("🔎 召回索引候选", key=f"fs_search_{pid}"):
+                hits = semantic_retrieve(
+                    pid, query_text, topk=int(topk_val), scope=scope_val, cur=cur
+                )
+                st.session_state[fs_hits_key] = hits
+
+            hits_cached = st.session_state.get(fs_hits_key, [])
+            if hits_cached:
+                st.caption(f"已加载 {len(hits_cached)} 条索引候选，可加入 Few-shot。")
+                for idx, item in enumerate(hits_cached, 1):
+                    score, meta, src_sent, tgt_sent = item
+                    corpus_id = int(meta.get("corpus_id") or 0)
+                    title_label = meta.get("title") or meta.get("lang_pair") or "索引条目"
+                    with st.expander(
+                        f"[{idx}] {title_label} · 分数 {score:.3f}", expanded=False
+                    ):
+                        st.markdown(f"**源句**: {src_sent}\n\n**译句**: {tgt_sent}")
+                        if corpus_id > 0:
+                            if st.button(
+                                "加入 Few-shot 参考集合",
+                                key=f"fs_add_{pid}_{corpus_id}_{idx}",
+                            ):
+                                refs = get_project_ref_ids(pid)
+                                refs.add(int(corpus_id))
+                                st.success(
+                                    f"已将索引条目对应的语料 #{corpus_id} 加入项目 Few-shot。"
+                                )
+                        else:
+                            st.caption("索引条目缺少 corpus_id，无法加入参考集合。")
+            else:
+                st.caption("输入查询后点击“召回索引候选”即可选择 Few-shot。")
 
         with st.expander("📎 源文件管理"):
             file_records = fetch_project_files(cur, pid)
+            file_options = [r["path"] for r in file_records] if file_records else []
             selected_src_path = st.selectbox(
                 "选择已上传文件作为源文件",
-                [r["path"] for r in file_records] if file_records else [],
+                file_options,
                 key=f"sel_src_{pid}",
-            ) if file_records else None
+            ) if file_options else None
+
+            batch_src_paths = st.multiselect(
+                "批量选择源文件 (顺序按列表显示)",
+                file_options,
+                key=f"batch_src_{pid}"
+            ) if file_options else []
 
             # 兼容旧数据：若 item_ext 为空但 items.body 有文件内容，则补录
             ensure_legacy_file_record(cur, conn, pid, src_path)
@@ -346,25 +486,24 @@ def render_project_tab(st, cur, conn, base_dir, use_semantic=True):
                 saved_names = st.session_state.get(saved_names_key, set())
                 new_files = [uf for uf in up_files if uf.name not in saved_names]
 
-                file_records, saved_paths = ([], [])
                 if new_files:
                     file_records, saved_paths = register_project_file(cur, conn, pid, new_files, base_dir)
                     saved_names.update([uf.name for uf in new_files])
                     st.session_state[saved_names_key] = saved_names
 
-                saved = len(saved_paths)
-
-                if file_records:
-                    st.markdown("附件列表:")
-                    for rec in file_records:
-                        info_cols = st.columns([5, 1])
-                        info = f"[#{rec['id']}] {rec['name']}｜{os.path.basename(rec['path'])}"
-                        if rec["uploaded_at"]:
-                            info += f"｜{rec['uploaded_at']}"
-                        info_cols[0].write(info)
-                        if info_cols[1].button("删除", key=f"del_file_{rec['id']}"):
-                            remove_project_file(cur, conn, rec["id"])
-                            st.rerun()
+            # 显示并允许删除附件（无论是否刚上传）
+            file_records = fetch_project_files(cur, pid)
+            if file_records:
+                st.markdown("附件列表:")
+                for rec in file_records:
+                    info_cols = st.columns([5, 1])
+                    info = f"[#{rec['id']}] {rec['name']}｜{os.path.basename(rec['path'])}"
+                    if rec["uploaded_at"]:
+                        info += f"｜{rec['uploaded_at']}"
+                    info_cols[0].write(info)
+                    if info_cols[1].button("删除", key=f"del_file_{rec['id']}"):
+                        remove_project_file(cur, conn, rec["id"])
+                        st.rerun()
 
             # 删除项目
             if st.button("删除项目", key=f"del_proj_{pid}"):
@@ -375,7 +514,11 @@ def render_project_tab(st, cur, conn, base_dir, use_semantic=True):
                 st.success("项目已删除")
                 st.rerun()
 
-        # —— 执行翻译
+        current_lang_pair = lang_pair or "中译英"
+        current_scope = semantic_scope or "project"
+        current_use_semantic = (use_sem_flag or "1") not in ("0", "False", "false")
+
+        # —— 执行翻译（单文件 / 批量）
         if st.button("执行翻译", key=f"run_{pid}", type="primary"):
             run_project_translation_ui(
                 pid=pid,
@@ -383,7 +526,25 @@ def render_project_tab(st, cur, conn, base_dir, use_semantic=True):
                 src_path=selected_src_path,
                 conn=conn,
                 cur=cur,
+                lang_pair=current_lang_pair,
+                use_semantic=current_use_semantic,
+                scope_val=current_scope,
             )
+
+        if batch_src_paths:
+            if st.button("批量翻译所选源文件", key=f"run_batch_{pid}", type="secondary"):
+                for idx_batch, batch_path in enumerate(batch_src_paths, start=1):
+                    st.markdown(f"### 批量翻译 {idx_batch}/{len(batch_src_paths)} ｜ {os.path.basename(batch_path)}")
+                    run_project_translation_ui(
+                        pid=pid,
+                        project_title=title,
+                        src_path=batch_path,
+                        conn=conn,
+                        cur=cur,
+                        lang_pair=current_lang_pair,
+                        use_semantic=current_use_semantic,
+                        scope_val=current_scope,
+                    )
 
         # —— 新增：进入翻译工作台（可编辑）
         if st.button("进入翻译工作台（可编辑）", key=f"workspace_{pid}", type="secondary"):
@@ -412,12 +573,12 @@ def render_project_tab(st, cur, conn, base_dir, use_semantic=True):
                 st.error("未检测到 DeepSeek Key，请配置 deepseek")
                 st.stop()
 
-            # 翻译方向（沿用你项目里已有的变量）
-            lang_pair_val = st.session_state.get(f"lang_{pid}", "中译英")
+            # 翻译方向（沿用项目已设定的变量）
+            lang_pair_val = current_lang_pair
 
-            # 是否启用语义召回 / 召回范围，直接沿用上面 Tab1 的设置
-            use_semantic_val = use_semantic
-            scope_val_local = scope_label
+            # 是否启用语义召回 / 召回范围
+            use_semantic_val = current_use_semantic
+            scope_val_local = current_scope
 
             draft = []
             for blk in blocks:
