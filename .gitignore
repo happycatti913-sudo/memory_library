@@ -1,0 +1,31 @@
+﻿# env & cache
+.venv2/
+__pycache__/
+*.pyc
+
+# secrets
+.streamlit/secrets.toml
+
+# temp & runtime
+logs/
+temp/
+t_ascii/
+semantic_index/
+deepseek_errors/
+.batch_extract_terms.state
+
+# scratch / temp scripts
+.tmp_*.py
+patch_edit.py
+fix_*.py
+list_widths.py
+replace_ucw.py
+py_write_test.txt
+
+# derived exports
+terms.csv
+
+# optional journals
+*.db-journal
+
+*-journal
